@@ -223,8 +223,9 @@ def _attribution(items: list[dict], party: dict) -> list[int | None]:
 
 
 def _may_remove(party: dict, uri: str, nth: int | None, who: Principal) -> bool:
-    """A user may remove anything; a guest only a copy they added."""
-    if not who.is_guest:
+    """A user may remove anything; anyone else (a guest) only a copy they
+    added. Fail closed: a display or any future kind is never a user."""
+    if who.is_user:
         return True
     adders = _adders(party, uri)
     return nth is not None and nth < len(adders) and adders[nth]["id"] == who.id

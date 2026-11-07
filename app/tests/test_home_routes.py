@@ -227,7 +227,12 @@ async def test_display_sees_what_a_guest_sees(rig):
     listed = (await tv.request("GET", "/api/parties")).json()
     assert [p["id"] for p in listed["parties"]] == [party["id"]]
     assert listed["presets"] == []
-    assert (await tv.request("GET", f"/api/parties/{party['id']}/queue")).status == 200
+    await client(USER).request("POST", f"/api/parties/{party['id']}/queue",
+                               {"uri": "x-file:1", "metadata": "<m/>"})
+    q = await tv.request("GET", f"/api/parties/{party['id']}/queue")
+    assert q.status == 200
+    items = q.json()["items"]
+    assert items and [i["can_remove"] for i in items] == [False] * len(items)
     assert (await tv.request("POST", f"/api/parties/{party['id']}/join")).status == 403
     assert (await tv.request("GET", "/api/presets")).status == 403
 

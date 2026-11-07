@@ -60,6 +60,9 @@ class Actor(Protocol):
     @property
     def is_guest(self) -> bool: ...
 
+    @property
+    def is_user(self) -> bool: ...
+
 
 class SpeakerTaken(Exception):
     """A speaker asked for belongs to another party, and taking it was not
@@ -498,9 +501,10 @@ class PartyEngine:
         return [w["id"] for w in self._added.get(party_id, {}).get(uri, [])]
 
     def can_remove(self, party_id: str, uri: str, principal: Actor) -> bool:
-        """A user may remove anything; a guest only a track whose oldest
-        attribution is theirs."""
-        if not principal.is_guest:
+        """A user may remove anything; anyone else (a guest) only a track
+        whose oldest attribution is theirs. Fail closed: a display or any
+        future kind is never treated as a user."""
+        if principal.is_user:
             return True
         who = self._added.get(party_id, {}).get(uri)
         return bool(who) and who[0]["id"] == principal.id
