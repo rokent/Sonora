@@ -1,4 +1,5 @@
-"""Sign-in routes: OIDC login, guest join, logout, who-am-I, guest pass.
+"""Sign-in routes: OIDC login, guest join, display links, logout, who-am-I,
+guest pass.
 
 The OIDC flow is the authorization code flow with PKCE. The state and the
 PKCE verifier ride in a short-lived signed cookie, so no server-side state is
@@ -20,7 +21,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from .auth import (
-    SESSION_COOKIE, GuestPass, Principal, auth_enabled, principal_of,
+    SESSION_COOKIE, DisplayLinks, GuestPass, Principal, auth_enabled, principal_of,
     read_payload, sign_payload, sign_session,
 )
 
@@ -29,6 +30,7 @@ router = APIRouter()
 OIDC_COOKIE = "sonora_oidc"
 USER_MAX_AGE = 30 * 24 * 3600
 GUEST_MAX_AGE = 12 * 3600
+DISPLAY_MAX_AGE = 365 * 24 * 3600
 OIDC_MAX_AGE = 600
 DISCOVERY_TTL = 3600
 
@@ -186,6 +188,22 @@ async def guest_join(request: Request):
     response = JSONResponse({"ok": True, "principal": _dump(p)})
     _set_cookie(response, SESSION_COOKIE, sign_session(p, GUEST_MAX_AGE),
                 GUEST_MAX_AGE, scheme)
+    return response
+
+
+@router.get("/auth/display")
+async def display_join(request: Request, token: str = ""):
+    """A TV opens its display link: a year-long read-only session, then the
+    TV mode page. A deleted (or wrong) link lands on the page with
+    ``error=removed`` so it can say so; no session is set."""
+    scheme, _ = _origin(request)
+    link = DisplayLinks().by_token(token)
+    if link is None:
+        return RedirectResponse("/tv?" + urlencode({"error": "removed"}), status_code=302)
+    p = Principal("display", link["id"], link["name"])
+    response = RedirectResponse("/tv?" + urlencode({"display": link["id"]}), status_code=302)
+    _set_cookie(response, SESSION_COOKIE, sign_session(p, DISPLAY_MAX_AGE),
+                DISPLAY_MAX_AGE, scheme)
     return response
 
 

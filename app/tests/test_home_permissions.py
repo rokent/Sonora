@@ -15,13 +15,14 @@ from backend import main
 from backend.config import settings
 from backend.home import permissions
 from backend.home.auth import SESSION_COOKIE, Principal, sign_session
-from backend.home.permissions import GUEST, PUBLIC, allowed
+from backend.home.permissions import DISPLAY, GUEST, PUBLIC, allowed
 
 from home_client import Client
 
 GUEST_P = Principal("guest", "guest:abc", "Ana")
 USER_P = Principal("user", "sub-1", "Tudor")
 SERVICE_P = Principal("service", "ha", "Home Assistant")
+DISPLAY_P = Principal("display", "d1", "Living Room TV")
 
 
 @pytest.fixture(autouse=True)
@@ -59,15 +60,19 @@ def _routes(routes):
             yield route
 
 
-def _guest_reachable() -> set[tuple[str, str]]:
-    """(method, route path) for every HTTP route of the real app a guest may call."""
+def _reachable(principal: Principal) -> set[tuple[str, str]]:
+    """(method, route path) for every HTTP route of the real app ``principal`` may call."""
     found = set()
     for route in _routes(main.app.routes):
         path = getattr(route, "path", "")
         for method in getattr(route, "methods", None) or ():
-            if method != "HEAD" and allowed(GUEST_P, method, _sample(path)):
+            if method != "HEAD" and allowed(principal, method, _sample(path)):
                 found.add((method, path))
     return found
+
+
+def _guest_reachable() -> set[tuple[str, str]]:
+    return _reachable(GUEST_P)
 
 
 # --- the rules ----------------------------------------------------------
@@ -82,6 +87,7 @@ EXPECTED_GUEST_WRITES = {
     ("POST", "/api/parties/{party_id}/join"),
     ("POST", "/api/parties/{party_id}/queue"),
     ("POST", "/api/parties/{party_id}/youtube"),
+    ("POST", "/api/parties/{party_id}/files"),
     ("DELETE", "/api/parties/{party_id}/queue/{index}"),
     ("POST", "/api/parties/{party_id}/volume"),
 }
@@ -91,16 +97,19 @@ EXPECTED_GUEST_WRITES = {
 EXPECTED_GUEST_READS = {
     ("GET", "/"),
     ("GET", "/join"),
+    ("GET", "/tv"),
     ("GET", "/party"),
     ("GET", "/party/{rest:path}"),
     ("GET", "/auth/login"),
     ("GET", "/auth/callback"),
+    ("GET", "/auth/display"),
     ("GET", "/api/me"),
     ("GET", "/api/health"),
     ("GET", "/api/art"),
     ("GET", "/api/stream/audio/{key}"),
     ("GET", "/api/home/media/{key}.m4a"),          # public: speakers
     ("GET", "/api/home/live/{key}.mp3"),           # public: speakers
+    ("GET", "/api/home/files/{name}"),             # public: speakers
     ("GET", "/api/state"),
     ("GET", "/api/home/config"),
     ("GET", "/api/favorites"),
@@ -145,6 +154,50 @@ def test_guest_reads_on_the_real_app_are_pinned():
     assert reads == EXPECTED_GUEST_READS
 
 
+#: Everything a display (a TV screen) can reach on the real app: the public
+#: routes plus the read-only DISPLAY list. Its only writes are the public
+#: sign-in routes, which need no principal at all.
+EXPECTED_DISPLAY_REACHABLE = {
+    # public
+    ("GET", "/"),
+    ("GET", "/join"),
+    ("GET", "/tv"),
+    ("GET", "/auth/login"),
+    ("GET", "/auth/callback"),
+    ("GET", "/auth/display"),
+    ("POST", "/auth/guest"),
+    ("POST", "/auth/logout"),
+    ("GET", "/api/me"),
+    ("GET", "/api/health"),
+    ("GET", "/api/art"),
+    ("GET", "/api/stream/audio/{key}"),
+    ("GET", "/api/home/media/{key}.m4a"),
+    ("GET", "/api/home/live/{key}.mp3"),
+    ("GET", "/api/home/files/{name}"),
+    # DISPLAY
+    ("GET", "/api/state"),
+    ("GET", "/api/home/config"),
+    ("GET", "/api/parties"),
+    ("GET", "/api/parties/{party_id}/queue"),
+    ("GET", "/api/displays/me"),
+}
+
+
+def test_display_reach_on_the_real_app_is_pinned():
+    assert _reachable(DISPLAY_P) == EXPECTED_DISPLAY_REACHABLE
+
+
+def test_display_list_is_read_only():
+    assert {m for m, _ in DISPLAY} == {"GET"}
+    for path in ("/ws", "/ws/visual", "/tv", "/api/displays/me"):
+        assert allowed(DISPLAY_P, "GET", path), path
+    for method, path in (("POST", "/api/parties"), ("POST", "/api/parties/p1/join"),
+                         ("POST", "/api/parties/p1/queue"), ("GET", "/api/favorites"),
+                         ("GET", "/party"), ("GET", "/api/displays"),
+                         ("GET", "/api/ha/status"), ("GET", "/api/queue/RINCON_1")):
+        assert not allowed(DISPLAY_P, method, path), (method, path)
+
+
 def test_guest_allowlist():
     assert allowed(GUEST_P, "POST", "/api/parties/p1/queue")
     assert allowed(GUEST_P, "POST", "/api/parties/p1/join")
@@ -181,7 +234,8 @@ def test_guest_reads():
 
 
 def test_public_needs_no_principal():
-    for method, path in (("GET", "/"), ("GET", "/join"), ("GET", "/assets/app-1a2b.js"),
+    for method, path in (("GET", "/"), ("GET", "/join"), ("GET", "/tv"),
+                         ("GET", "/auth/display"), ("GET", "/assets/app-1a2b.js"),
                          ("GET", "/favicon.ico"), ("GET", "/manifest.webmanifest"),
                          ("GET", "/auth/login"), ("GET", "/auth/callback"),
                          ("POST", "/auth/guest"), ("POST", "/auth/logout"),
@@ -300,6 +354,14 @@ async def test_ws_requires_session(monkeypatch):
     sent = await client().websocket("/ws")
     assert sent[0]["type"] == "websocket.close" and sent[0]["code"] == 1008
     sent = await client(GUEST_P).websocket("/ws")
+    assert sent[0]["type"] == "websocket.accept"
+
+
+async def test_ws_accepts_a_display(monkeypatch):
+    from backend.home.auth import DisplayLinks
+    enable(monkeypatch)
+    link, _ = DisplayLinks().create("TV")
+    sent = await client(Principal("display", link["id"], "TV")).websocket("/ws")
     assert sent[0]["type"] == "websocket.accept"
 
 

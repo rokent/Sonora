@@ -26,7 +26,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import media, youtube
+from . import files, media, youtube
 from .auth import Principal, request_principal
 from .parties import MixedHousehold, NoSpeakers, PartyEngine, SpeakerTaken
 from .presets import Presets
@@ -97,6 +97,11 @@ def engine() -> PartyEngine:
             raise Refused(503, "parties_unavailable") from None
         _held.pop("failed", None)
         controller.on_state(found.on_state)
+        found.on_end(lambda party_id: files.delete_party(party_id))
+        try:
+            files.cleanup(p["id"] for p in found.list())
+        except OSError:
+            log.exception("files: startup cleanup failed")
         _held["engine"] = held = (controller, path, found)
         _members.clear()
     return held[2]
@@ -167,9 +172,10 @@ def _with_members(party: dict) -> dict:
 
 
 def _party(party_id: str, who: Principal) -> dict:
-    """The party, as ``who`` may see it: a guest sees only running ones."""
+    """The party, as ``who`` may see it: a guest (or a display) sees only
+    running ones."""
     found = engine().get(party_id)
-    if found is None or (who.is_guest and not found["speakers"]):
+    if found is None or (not who.is_user and not found["speakers"]):
         raise Refused(404, "not_found", message=party_id)
     return found
 
@@ -222,8 +228,9 @@ def _attribution(items: list[dict], party: dict) -> list[int | None]:
 
 
 def _may_remove(party: dict, uri: str, nth: int | None, who: Principal) -> bool:
-    """A user may remove anything; a guest only a copy they added."""
-    if not who.is_guest:
+    """A user may remove anything; anyone else (a guest) only a copy they
+    added. Fail closed: a display or any future kind is never a user."""
+    if who.is_user:
         return True
     adders = _adders(party, uri)
     return nth is not None and nth < len(adders) and adders[nth]["id"] == who.id
@@ -270,17 +277,60 @@ async def _start(who: Principal, *, name: str | None, speakers: list[str] | None
         kwargs.update(name=name or f"{who.name}'s party", speakers=speakers or [])
     party = await _engine_call(engine().start(**kwargs))
     await changed()
+    tv = (preset or {}).get("tv")
+    if tv:
+        party = {**party, **_show_on_tv(tv, party["id"])}
     return party
+
+
+#: Preset TV shows still running; held so they are not garbage-collected.
+_tv_tasks: set[asyncio.Task] = set()
+
+
+def _show_on_tv(tv: dict, party_id: str) -> dict:
+    """Show a just-started preset party on the preset's TV without making the
+    start wait: an unknown TV or a bad mode is answered at once as
+    ``tv_error``; otherwise the show runs in the background (``tv:
+    "pending"``) and its outcome is broadcast as ``{"type": "tv_result"}``."""
+    from . import tvs  # lazy: keeps the TV code out of this module's import
+
+    try:
+        tvs.prepare(tv["tv_id"], tv.get("show"))
+    except tvs.TvError as exc:
+        return {"tv_error": exc.error}
+    task = asyncio.create_task(_show_in_background(tv, party_id))
+    _tv_tasks.add(task)
+    task.add_done_callback(_tv_tasks.discard)
+    return {"tv": "pending"}
+
+
+async def _show_in_background(tv: dict, party_id: str) -> None:
+    from . import tvs
+
+    error = None
+    try:
+        await tvs.show(tv["tv_id"], party_id, tv.get("show"))
+    except tvs.TvError as exc:
+        error = exc.error
+    except Exception:                                  # noqa: BLE001 - reported, never raised
+        log.exception("tvs: showing party %s on %s failed", party_id, tv.get("tv_id"))
+        error = "tv_failed"
+    try:
+        await _main()._fan_out({"type": "tv_result", "party": party_id, "tv_id": tv["tv_id"],
+                                "ok": error is None, "error": error})
+    except Exception:                                  # noqa: BLE001
+        log.exception("tvs: broadcasting the result for party %s failed", party_id)
 
 
 @router.get("/api/parties")
 async def list_parties(request: Request):
     who = request_principal(request)
     try:
-        found = [_with_members(p) for p in engine().list() if not who.is_guest or p["speakers"]]
+        found = [_with_members(p) for p in engine().list() if who.is_user or p["speakers"]]
     except Refused as exc:
         return _answer(exc)
-    return {"parties": found, "presets": [] if who.is_guest else presets().list()}
+    # Guests and displays (TV screens) see running parties and no presets.
+    return {"parties": found, "presets": presets().list() if who.is_user else []}
 
 
 @router.post("/api/parties")
@@ -432,6 +482,49 @@ async def add_youtube_to_party_queue(request: Request, party_id: str, body: YouT
         engine().record_add(party_id, uri, who)
     await changed()
     return {"ok": True, "item": _brief(video)}
+
+
+@router.post("/api/parties/{party_id}/files")
+async def add_file_to_party_queue(request: Request, party_id: str, name: str = "",
+                                  next: bool = False):
+    """Drop a music file into the party: the request body is the file's bytes
+    (``?name=<file name>`` gives its extension and, without tags, its title)."""
+    who = request_principal(request)
+    try:
+        lead = _lead(_party(party_id, who))
+    except Refused as exc:
+        return _answer(exc)
+    if next and who.is_guest:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if files.extension_of(name) is None:
+        return JSONResponse({"error": "unsupported_type"}, status_code=415)
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > files.MAX_BYTES:
+        return JSONResponse({"error": "too_large"}, status_code=413)
+    try:
+        stored = await files.store_stream(party_id, name, request.stream())
+    except files.FileError as exc:
+        return JSONResponse({"error": exc.error}, status_code=exc.status)
+    # The party may have ended while the bytes were arriving.
+    if engine().get(party_id) is None:
+        files.discard(stored)
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    try:
+        host = _main().state["controller"].coordinator_of(lead).host
+        uri = media.base_url(host) + files.file_uri_path(stored)
+        metadata = files.didl_for(stored, uri)
+        async with _queue_lock:
+            await _main().state["commands"].add_to_queue(lead, uri, metadata, next_=next)
+            engine().record_add(party_id, uri, who)
+    except BaseException:
+        files.discard(stored)
+        raise
+    await changed()
+    return {"ok": True, "item": {"title": stored.title, "artist": stored.artist,
+                                 "size": stored.size, "type": stored.ext}}
 
 
 @router.post("/api/parties/{party_id}/queue")

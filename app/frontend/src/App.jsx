@@ -1,9 +1,11 @@
-import React, { useEffect, useState } from 'react'
+import React, { Suspense, lazy, useEffect, useState } from 'react'
 import { useTheme } from './lib/theme.jsx'
 import { useSystem } from './lib/store.jsx'
 import Splash from './components/Splash.jsx'
 import LayoutShell from './parts/LayoutShell.jsx'
-import PartyApp from './home/PartyApp.jsx'
+// Loaded on demand, so the party page (and its QR library) stays out of
+// the themes' bundle.
+const PartyApp = lazy(() => import('./home/PartyApp.jsx'))
 import { withBase } from './lib/base.js'
 import { useMe } from './home/useMe.js'
 import { useI18n } from './i18n/index.jsx'
@@ -20,7 +22,7 @@ export default function App() {
   // Until we know who is looking, a guest must not glimpse the theme shell.
   if (me.loading) return <div style={{ minHeight: '100%', background: 'var(--t-bg, #f6f6f7)' }} />
   // A guest has the party screens and nothing else.
-  if (me.principal?.kind === 'guest') return <PartyApp />
+  if (me.principal?.kind === 'guest') return <Suspense fallback={null}><PartyApp /></Suspense>
   return <Household partiesLink={!!(me.auth && me.principal?.kind === 'user')} />
 }
 

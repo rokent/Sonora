@@ -29,6 +29,7 @@ change, so a restart of Sonora keeps every way back.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -59,6 +60,9 @@ class Actor(Protocol):
 
     @property
     def is_guest(self) -> bool: ...
+
+    @property
+    def is_user(self) -> bool: ...
 
 
 class SpeakerTaken(Exception):
@@ -153,12 +157,12 @@ class PartyEngine:
         self._stacks: dict[str, list[dict]] = {}
         #: ``{party: {uri: [{"id", "name"}, ...]}}``, oldest adder first.
         self._added: dict[str, dict[str, list[dict]]] = {}
+        #: Called with a party's id as it ends; see ``on_end`` for when.
+        self._end_listeners: list[Callable[[str], Awaitable[None] | None]] = []
         #: Held while a party changes, so changes run one at a time and the
         #: topology events Sonora's own regrouping brings are not read as
         #: another app's doing.
         self._lock = asyncio.Lock()
-        #: Called with a party's id as it ends, before its speakers are let go.
-        self._end_listeners: list[Callable[[str], Awaitable[None]]] = []
         self._load()
 
     # -- persistence -----------------------------------------------------------
@@ -406,11 +410,28 @@ class PartyEngine:
             self._save()
         return {**asdict(party), "report": {k: report.get(k) for k in ("set", "missing", "failed")}}
 
-    def on_end(self, listener: Callable[[str], Awaitable[None]]) -> None:
-        """Call ``listener(party_id)`` whenever a party ends, before its
-        speakers are released (live sound stops first). It runs while the
-        engine is changing, so it must not call back into the engine."""
-        self._end_listeners.append(listener)
+    def on_end(self, callback: Callable[[str], Awaitable[None] | None]) -> None:
+        """Call ``callback(party_id)`` whenever a party ends. Any number of
+        listeners; each may be sync or async.
+
+        Order inside ``end``: the party is first forgotten (removed from the
+        engine and saved, so e.g. new file uploads for it are refused), then
+        every listener runs, then the speakers are released. So listeners run
+        after the party is gone but before its speakers are let go (live sound
+        stops before the speakers rejoin their old groups). They run while the
+        engine holds its lock, so they must not call back into the engine's
+        locked methods. A failing listener is logged and does not stop the
+        others or the end itself."""
+        self._end_listeners.append(callback)
+
+    async def _fire_end(self, party_id: str) -> None:
+        for callback in list(self._end_listeners):
+            try:
+                result = callback(party_id)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                log.exception("parties: an on_end listener failed for %s", party_id)
 
     async def end(self, party_id: str) -> dict:
         """End the party: each speaker rejoins the party it was taken from if
@@ -418,17 +439,13 @@ class PartyEngine:
         party. The party and its attribution are forgotten."""
         async with self._lock:
             party = self._party(party_id)
-            for listener in list(self._end_listeners):
-                try:
-                    await listener(party_id)
-                except Exception:
-                    log.exception("parties: an end listener failed for %s", party_id)
             plans = {zone: self._leave_plan(zone, party_id) for zone in party.speakers}
             for zone in list(self._stacks):
                 self._drop_entries(zone, party_id)
             del self._parties[party_id]
             self._added.pop(party_id, None)
             self._save()
+            await self._fire_end(party_id)
             report = await self._release(plans)
             self._save()
         return {"id": party_id, "name": party.name, **report}
@@ -511,9 +528,10 @@ class PartyEngine:
         return [w["id"] for w in self._added.get(party_id, {}).get(uri, [])]
 
     def can_remove(self, party_id: str, uri: str, principal: Actor) -> bool:
-        """A user may remove anything; a guest only a track whose oldest
-        attribution is theirs."""
-        if not principal.is_guest:
+        """A user may remove anything; anyone else (a guest) only a track
+        whose oldest attribution is theirs. Fail closed: a display or any
+        future kind is never treated as a user."""
+        if principal.is_user:
             return True
         who = self._added.get(party_id, {}).get(uri)
         return bool(who) and who[0]["id"] == principal.id

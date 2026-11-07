@@ -259,6 +259,9 @@ def test_guest_can_remove_only_own(rig):
     assert not engine.can_remove(party["id"], "x-file:2", GUEST)
     assert not engine.can_remove(party["id"], "x-file:9", GUEST)
     assert engine.can_remove(party["id"], "x-file:2", ANA)
+    # anything that is not a user (a display, a future kind) is never one
+    for kind in ("display", "robot"):
+        assert not engine.can_remove(party["id"], "x-file:2", _Who(kind, "d_1", "TV"))
     engine.record_remove(party["id"], "x-file:1")
     assert engine.added_by(party["id"], "x-file:1") == ["g_2"]
     assert engine.can_remove(party["id"], "x-file:1", OTHER_GUEST)

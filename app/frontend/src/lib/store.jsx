@@ -64,6 +64,10 @@ const initialState = {
   // and afterwards what it found.
   scanning: false,
   lastScan: null,
+  // Sonora Home: bumped when the parties change, so the party page
+  // refetches; and the last "a room left the party" notice.
+  partiesEpoch: 0,
+  lastPartyNotice: null,
 }
 
 // When a room's state arrived, on the page's own clock. Its position_age
@@ -221,6 +225,11 @@ function reducer(state, action) {
         ...state,
         notices: state.notices.filter((n) => n.id !== action.id),
       }
+
+    case 'parties':
+      return { ...state, partiesEpoch: state.partiesEpoch + 1 }
+    case 'partyNotice':
+      return { ...state, lastPartyNotice: { ...action.notice, at: Date.now() } }
 
     case 'scanning':
       return { ...state, scanning: action.value }
@@ -407,6 +416,12 @@ export function SystemProvider({ children }) {
           dispatch({ type: message.type })
         } else if (message.type === 'softwareUpdate') {
           dispatch({ type: 'softwareUpdate' })
+        } else if (message.type === 'parties') {
+          // Sonora Home: a party started, ended, or changed speakers or queue.
+          dispatch({ type: 'parties' })
+        } else if (message.type === 'party_notice') {
+          dispatch({ type: 'partyNotice',
+                     notice: { party: message.party, zone: message.zone, event: message.event } })
         }
       }
       socket.onclose = () => {

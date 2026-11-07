@@ -5,8 +5,10 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App.jsx'
 import JoinPage from './home/JoinPage.jsx'
-import PartyApp from './home/PartyApp.jsx'
 import ErrorBoundary from './components/ErrorBoundary.jsx'
+
+// The party page loads on demand, outside the themes' bundle.
+const PartyApp = React.lazy(() => import('./home/PartyApp.jsx'))
 import { SystemProvider } from './lib/store.jsx'
 import { ThemeProvider, useTheme } from './lib/theme.jsx'
 import { I18nProvider } from './i18n/index.jsx'
@@ -26,7 +28,7 @@ function Routed() {
   const path = window.location.pathname.replace(/\/+$/, '')
   const local = BASE && path.startsWith(BASE) ? path.slice(BASE.length) : path
   if (local === '/party' || local.startsWith('/party/')) {
-    return <ErrorBoundary><PartyApp /></ErrorBoundary>
+    return <ErrorBoundary><React.Suspense fallback={null}><PartyApp /></React.Suspense></ErrorBoundary>
   }
   return <Guarded />
 }

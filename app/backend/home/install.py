@@ -11,7 +11,7 @@ import inspect
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import Response
 
-from . import auth_routes, config_routes, ha, permissions, routes
+from . import auth_routes, config_routes, display_routes, ha, permissions, routes, tv_routes
 
 #: Pages of Sonora Home's own that the interface routes by path: they are the
 #: same page shell Sonora serves at ``/``.
@@ -32,6 +32,11 @@ async def _page_shell(request: Request) -> Response:
 
 @pages.get("/join", include_in_schema=False)
 async def join_page(request: Request) -> Response:
+    return await _page_shell(request)
+
+
+@pages.get("/tv", include_in_schema=False)
+async def tv_page(request: Request) -> Response:
     return await _page_shell(request)
 
 
@@ -62,8 +67,14 @@ def install(app: FastAPI) -> None:
     app.include_router(routes.router)
     app.include_router(ha.router)
     app.include_router(config_routes.router)
+    app.include_router(tv_routes.router)
+    app.include_router(display_routes.router)
     app.include_router(pages)
     from . import media  # YouTube relay for speakers (Phase 2)
     app.include_router(media.router)
     from . import live_routes  # live sound for speakers (Phase 4)
     app.include_router(live_routes.router)
+    from . import files  # dropped music files for speakers (Phase 4)
+    app.include_router(files.router)
+    from . import analysis  # /ws/visual: TV mode's exact visuals (Phase 3)
+    app.include_router(analysis.router)

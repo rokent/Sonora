@@ -103,7 +103,7 @@ def keys() -> MediaKeys:
     return _keys
 
 
-def speaker_base(host_for: str) -> str:
+def base_url(host_for: str) -> str:
     """``http://<ip>:<port>`` as a speaker reaches us: the address speakers
     already reach us on (the event callback address), else the route toward
     ``host_for``."""
@@ -118,7 +118,12 @@ def speaker_base(host_for: str) -> str:
 
 def media_url(key: str, host_for: str) -> str:
     """The URL a speaker fetches for a media key."""
-    return f"{speaker_base(host_for)}/api/home/media/{key}.m4a"
+    return f"{base_url(host_for)}/api/home/media/{key}.m4a"
+
+
+#: The same address under the live hub's name (``live_routes`` passes it as
+#: the hub's ``base_url``); one implementation, two names.
+speaker_base = base_url
 
 
 def _x(text: str) -> str:
