@@ -564,3 +564,37 @@ async def test_internal_ends_are_kept_referenced():
     assert s.ended and s.reason == "encoder_stopped"
     await _settle()                          # done callbacks run a tick later
     assert not s._ending                     # held while running, released after
+
+
+async def test_party_end_during_a_pending_resume_with_a_concurrent_start():
+    t = make_hub()
+    s = await t.hub.start(target=("party", "p1"), source_name="A", by="u")
+    await t.hub._lock.acquire()          # the resume will have to wait for it
+    ending = asyncio.ensure_future(s.end("disconnected"))
+    await _settle()
+    assert t.hub._resuming.get(("party", "p1")) is not None
+    starting = asyncio.ensure_future(t.hub.start(target=("party", "p1"), source_name="B", by="u"))
+    await _settle()
+    assert not starting.done()
+    t.running.discard("p1")
+    await t.hub.end_for_party("p1")
+    t.hub._lock.release()
+    await asyncio.wait_for(ending, 1)    # returns cleanly, no CancelledError
+    with pytest.raises(live.NoTarget):
+        await asyncio.wait_for(starting, 1)
+    assert t.commands.resumes() == []
+    assert [c[0] for c in t.commands.calls] == ["play_now"]
+    await _settle()
+    assert not t.hub._resuming and not t.hub._skip
+
+
+async def test_a_resume_skipped_by_party_end_skips_even_if_the_party_still_resolves():
+    t = make_hub()
+    s = await t.hub.start(target=("party", "p1"), source_name="A", by="u")
+    await t.hub._lock.acquire()
+    ending = asyncio.ensure_future(s.end("disconnected"))
+    await _settle()
+    await t.hub.end_for_party("p1")      # engine calls this before forgetting the party
+    t.hub._lock.release()
+    await asyncio.wait_for(ending, 1)
+    assert t.commands.resumes() == []

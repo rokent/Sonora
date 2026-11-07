@@ -427,6 +427,8 @@ class LiveHub:
         #: The task holding ``_lock`` in ``start`` (an end inside it must not
         #: wait for a resume that needs the lock).
         self._lock_owner: asyncio.Task | None = None
+        #: Resume tasks whose party ended before they ran: they do nothing.
+        self._skip: set[asyncio.Task] = set()
 
     # -- reading ---------------------------------------------------------------
 
@@ -473,7 +475,11 @@ class LiveHub:
         # new session (it also needs the lock; waiting outside it avoids
         # depending on who reached the lock first).
         while (pending := self._resuming.get(target)) is not None:
-            await asyncio.shield(pending)
+            if pending.done():
+                # Its done callback has not run yet; awaiting would not yield.
+                self._resuming.pop(target, None)
+                break
+            await self._wait_resume(pending)
         async with self._lock:
             self._lock_owner = asyncio.current_task()
             try:
@@ -547,13 +553,25 @@ class LiveHub:
             return
         task = self._schedule_resume(session.target, point)
         if self._lock_owner is not asyncio.current_task():
+            await self._wait_resume(task)
+
+    @staticmethod
+    async def _wait_resume(task: asyncio.Task) -> None:
+        """Wait for a resume to be over. The resume being cancelled (rather
+        than the waiter) just means it is over."""
+        try:
             await asyncio.shield(task)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
 
     def _schedule_resume(self, target: Target, point: dict) -> asyncio.Task:
         task = asyncio.ensure_future(self._resume_now(target, point))
         self._resuming[target] = task
 
         def done(t: asyncio.Task) -> None:
+            self._skip.discard(t)
             if self._resuming.get(target) is t:
                 del self._resuming[target]
         task.add_done_callback(done)
@@ -563,6 +581,8 @@ class LiveHub:
         """Put the queue back where ``point`` says, under the hub's lock so
         it never interleaves with a start's ``play_now``."""
         async with self._lock:
+            if asyncio.current_task() in self._skip:
+                return      # its party ended meanwhile
             if target in self._current:
                 # A newer session got in first: it owns the way back.
                 self._resume.setdefault(target, point)
@@ -589,9 +609,11 @@ class LiveHub:
         target = ("party", str(party_id))
         self._resume.pop(target, None)
         self._just_resumed.pop(target, None)
-        pending = self._resuming.pop(target, None)
+        pending = self._resuming.get(target)
         if pending is not None:
-            pending.cancel()
+            # Not cancelled (its waiters would see a CancelledError): it
+            # sees this mark once it has the lock and does nothing.
+            self._skip.add(pending)
         session = self._current.get(target)
         if session is not None:
             await session.end("party_ended")
