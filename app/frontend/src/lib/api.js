@@ -24,6 +24,9 @@ export class ApiError extends Error {
     this.service = payload?.service
     this.action = payload?.action
     this.hint = payload?.hint
+    // The whole answer, for a caller that needs more than the fields above
+    // (a party's speaker_taken names the room and the party holding it).
+    this.body = payload || null
   }
 
   /** A guest asked for something only the household's own people may do. */

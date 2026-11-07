@@ -17,6 +17,8 @@ Bundled into the JavaScript every browser loads:
 | [scheduler](https://react.dev/) | 0.28.0 | MIT | React DOM's task scheduler, bundled with it. |
 | [hls.js](https://github.com/video-dev/hls.js) | 1.7.3 | Apache-2.0 | Plays HLS radio streams in the "This browser" room. |
 | [@material/material-color-utilities](https://github.com/material-foundation/material-color-utilities) | 0.4.0 | Apache-2.0 | Material Girl's dynamic color: picks the seed from the playing cover and builds the Material scheme from it. |
+| [qrcode](https://github.com/soldair/node-qrcode) | 1.5.4 | MIT | Draws the guest pass's QR code on the party page (Sonora Home). |
+| [dijkstrajs](https://github.com/tcort/dijkstrajs) | 1.0.3 | MIT | qrcode's segment optimiser, bundled with it. |
 | [vite](https://vite.dev) | 8.3.0 | MIT | The build tool; only its small module-preload helper is in the page. |
 | [Material Design Icons](https://pictogrammers.com/library/mdi/), "speaker-multiple" | 7.x | Apache-2.0 | The room-speaker glyph (`RoomSpeaker` in `app/frontend/src/components/Icons.jsx`). |
 | [Material Design Icons](https://pictogrammers.com/library/mdi/), "link-off" | 7.x | Apache-2.0 | Sonofuture's and Liquid Glass's leave-group glyph (`LeaveGroup` in each theme's `icons.jsx`). |
@@ -286,6 +288,42 @@ Licensed under the Apache License, Version 2.0; the text is below.
 Copyright 2021 Google LLC
 
 Licensed under the Apache License, Version 2.0; the text is below.
+```
+
+### qrcode 1.5.4
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2012 Ryan Day
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### dijkstrajs 1.0.3
+
+```
+Dijkstra path-finding functions. Adapted from the Dijkstar Python project.
+
+Copyright (C) 2008
+  Wyatt Baldwin <self@wyattbaldwin.com>
+  All rights reserved
+
+Licensed under the MIT license.
+
+  http://www.opensource.org/licenses/mit-license.php
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 ### Material Design Icons
