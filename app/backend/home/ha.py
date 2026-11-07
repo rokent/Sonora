@@ -156,7 +156,19 @@ async def ha_end(request: Request, party_id: str):
     return result
 
 
+class TvBody(BaseModel):
+    mode: str | None = None
+
+
 @router.post("/api/ha/parties/{party_id}/tv/{tv_id}")
-async def ha_tv(request: Request, party_id: str, tv_id: str):
+async def ha_tv(request: Request, party_id: str, tv_id: str, body: TvBody | None = None):
+    """Show a party on a TV, in the given mode or the TV's default."""
+    from . import tv_routes, tvs  # tv_routes imports routes, as this module does
+
     request_principal(request)
-    return JSONResponse({"error": "phase3"}, status_code=501)
+    try:
+        return await tv_routes.show_party(tv_id, party_id, body.mode if body else None)
+    except Refused as exc:
+        return _answer(exc)
+    except tvs.TvError as exc:
+        return JSONResponse(exc.body, status_code=exc.status)

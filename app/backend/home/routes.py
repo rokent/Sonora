@@ -269,7 +269,25 @@ async def _start(who: Principal, *, name: str | None, speakers: list[str] | None
         kwargs.update(name=name or f"{who.name}'s party", speakers=speakers or [])
     party = await _engine_call(engine().start(**kwargs))
     await changed()
+    tv = (preset or {}).get("tv")
+    if tv:
+        party = {**party, **await _show_on_tv(tv, party["id"])}
     return party
+
+
+async def _show_on_tv(tv: dict, party_id: str) -> dict:
+    """Show a just-started preset party on the preset's TV. The party stands
+    whatever the TV does: a failure comes back as ``tv_error``."""
+    from . import tvs  # lazy: keeps the TV code out of this module's import
+
+    try:
+        await tvs.show(tv["tv_id"], party_id, tv.get("show"))
+    except tvs.TvError as exc:
+        return {"tv_error": exc.error}
+    except Exception:                                  # noqa: BLE001 - never fail the start
+        log.exception("tvs: showing party %s on %s failed", party_id, tv.get("tv_id"))
+        return {"tv_error": "tv_failed"}
+    return {}
 
 
 @router.get("/api/parties")

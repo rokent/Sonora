@@ -96,8 +96,3 @@ async def test_preset_start_takes_owned_speakers_and_end(rig):
     assert routes.engine().owner_of("A") is None
     assert (await call(t, "POST", "/api/ha/parties/zzz/end")).status == 404
 
-
-async def test_tv_route_reserved(rig):
-    t = (await _token())["token"]
-    r = await call(t, "POST", "/api/ha/parties/p/tv/tv1")
-    assert r.status == 501 and r.json() == {"error": "phase3"}
