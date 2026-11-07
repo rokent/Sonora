@@ -7,6 +7,8 @@
 // the same rules (lib/items.js canEnqueue for a service's results, Browse's
 // isQueueable for a favorite), so a station never lands in a queue here
 // either.
+//
+// A second tab adds YouTube videos (YouTubeSearch.jsx).
 import React, { useEffect, useMemo, useState } from 'react'
 import { useI18n } from '../i18n/index.jsx'
 import { api } from '../lib/api.js'
@@ -16,6 +18,7 @@ import { TUNEIN } from '../lib/sonosServices.js'
 import Art from '../components/Art.jsx'
 import { homeApi } from './api.js'
 import { errorText } from './partyKit.jsx'
+import YouTubeSearch from './YouTubeSearch.jsx'
 
 const SEARCH_DELAY_MS = 450
 
@@ -40,7 +43,24 @@ function Row({ item, state, onAdd }) {
   )
 }
 
+/** Where songs come from: the system's music services, or YouTube. */
 export default function AddSongs({ party, onAdded }) {
+  const { t } = useI18n()
+  const [source, setSource] = useState('music')
+  return (
+    <>
+      <div className="hp-tabs hp-tabs--sub" role="tablist">
+        <button type="button" role="tab" aria-selected={source === 'music'} className="hp-tab"
+                onClick={() => setSource('music')}>{t('home.add.music')}</button>
+        <button type="button" role="tab" aria-selected={source === 'youtube'} className="hp-tab"
+                onClick={() => setSource('youtube')}>{t('home.add.youtube')}</button>
+      </div>
+      {source === 'music' ? <MusicSearch party={party} onAdded={onAdded} /> : <YouTubeSearch party={party} onAdded={onAdded} />}
+    </>
+  )
+}
+
+function MusicSearch({ party, onAdded }) {
   const { t } = useI18n()
   const lead = party.speakers?.[0] || ''
   const [term, setTerm] = useState('')

@@ -84,6 +84,10 @@ const ERROR_KEYS = {
   tv_unreachable: 'home.tv.unreachable',
   tv_needs_pairing: 'home.tv.needsPairing',
   tv_failed: 'home.tv.failed',
+  bad_link: 'home.youtube.error.badLink',
+  no_audio: 'home.youtube.error.noAudio',
+  youtube_failed: 'home.youtube.error.failed',
+  bad_query: 'home.youtube.error.badQuery',
 }
 
 /** Words for a failed party request. */
