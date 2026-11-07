@@ -91,6 +91,9 @@ class _Commands:
     async def set_source(self, zone, uri, metadata=""):
         self.calls.append(("set_source", zone, uri))
 
+    async def seek_track(self, zone, index):
+        self.calls.append(("seek_track", zone, index))
+
     async def play(self, zone):
         self.calls.append(("play", zone))
 
@@ -234,6 +237,7 @@ def test_add_and_remove_speaker(rig):
 def test_outside_change_drops_speaker(rig):
     engine = rig.engine()
     party = run(engine.start(name="One", speakers=["A", "B"], by=ANA))
+    rig.commands.calls.clear()                       # the start pointed A at its queue
     rig.controller.lead["B"] = "B"                   # another app took B out of the group
     run(engine.on_state({"type": "snapshot"}))
     assert rig.notices == [{"type": "party_notice", "party": party["id"], "zone": "B", "event": "left"}]
@@ -489,6 +493,35 @@ def test_end_puts_back_the_queue_the_party_found(tmp_path, monkeypatch):
     assert seeks and seeks[0]["Target"] == 2
 
 
+def test_a_quiet_party_on_airplay_takes_the_speaker_to_its_queue_and_back(tmp_path, monkeypatch):
+    """The hardware case through the real scene machinery: the Roam plays the
+    iPhone over AirPlay; the party points it at its queue once what it was
+    is written down, and ending the party hands AirPlay back."""
+    monkeypatch.setattr(scenes, "GROUP_SETTLE", 0)
+    controller = _SceneController()
+    airplay = "x-sonos-vli:RINCON_C43875C3DCEC01400:1,airplay:04470cd8"
+    controller.zones["A"].transport.media_uri = airplay
+    controller.zones["A"].transport.track_number = 1
+    soap = _SceneSoap(["x-file:1"])
+
+    class _Following(_SceneCommands):
+        async def set_source(self, zone, uri, metadata=""):
+            self.calls.append(("set_source", zone, uri, metadata))
+            controller.zones["A"].transport.media_uri = uri
+    commands = _Following(soap)
+
+    async def notify(message):
+        pass
+    engine = PartyEngine(tmp_path / "parties.json", controller, commands, None, notify)
+    party = run(engine.start(name="One", speakers=["A"], by=ANA))
+    assert commands.calls.index(("pause", "A")) < commands.calls.index(("set_source", "A", "x-rincon-queue:A#0", ""))
+    assert engine._parties[party["id"]].own_source is None
+    commands.calls.clear()
+    run(engine.end(party["id"]))
+    assert ("set_source", "A", airplay, "") in commands.calls
+    assert ("play", "A") in commands.calls
+
+
 # -- last action wins: something else played on the party's speakers ----------
 
 
@@ -552,24 +585,121 @@ def test_the_party_own_sources_are_not_outside_changes(rig):
     assert [n["zone"] for n in rig.notices] == ["B"]
 
 
-def test_a_quiet_party_owns_what_its_lead_had_loaded(rig, monkeypatch):
+AIRPLAY = "x-sonos-vli:RINCON_C43875C3DCEC01400:1,airplay:04470cd8"
+
+
+def _loaded(monkeypatch, uri):
+    """Every room the scene writes down had ``uri`` loaded, as a lead does."""
     fake = scenes.apply
 
     async def with_transport(ctrl, cmds, scene, metadata_for=None):
         report = await fake(ctrl, cmds, scene, metadata_for)
         for room in report["before"]["rooms"].values():
-            room["transport"] = {"media_uri": "x-sonosapi-stream:kept"}
+            room["transport"] = {"media_uri": uri}
         return report
     monkeypatch.setattr(scenes, "apply", with_transport)
+
+
+def test_a_quiet_party_points_its_lead_at_its_own_queue(rig, monkeypatch):
+    # Real hardware: a Roam on the owner's iPhone over AirPlay, party started
+    # with no music. The party's own source is its queue, never the AirPlay.
+    _loaded(monkeypatch, AIRPLAY)
     engine = rig.engine()
-    run(engine.start(name="Quiet", speakers=["A"], by=ANA))
-    _plays(rig, "A", "x-sonosapi-stream:kept")
+    party = run(engine.start(name="Quiet", speakers=["A", "B"], by=ANA))
+    assert rig.commands.calls[-1] == ("set_source", "A", "x-rincon-queue:A#0")
+    assert ("play", "A") not in rig.commands.calls           # left quiet
+    assert engine._parties[party["id"]].own_source is None
+    # A report from before the switch is not read as someone else's doing.
+    _plays(rig, "A", AIRPLAY)
+    run(engine.on_state({"type": "zone"}))
+    assert rig.notices == [] and engine.list()[0]["speakers"] == ["A", "B"]
+    _plays(rig, "A", "x-rincon-queue:A#0")
     run(engine.on_state({"type": "zone"}))
     assert rig.notices == []
-    # seen playing its own, so the next change of source is someone else's
-    _plays(rig, "A", "x-sonosapi-stream:other")
+    # seen on its queue, so the iPhone taking the speaker back is someone else's
+    _plays(rig, "A", AIRPLAY)
     run(engine.on_state({"type": "zone"}))
-    assert [n["zone"] for n in rig.notices] == ["A"]
+    assert [n["zone"] for n in rig.notices] == ["A", "B"]
+    # and ending it restores the way back the scene wrote down
+    rig.reverted.clear()
+    run(engine.end(party["id"]))
+    assert rig.reverted == []                                # let go: nothing owed
+
+
+def test_ending_a_quiet_party_reverts_to_what_the_lead_played(rig, monkeypatch):
+    _loaded(monkeypatch, AIRPLAY)
+    engine = rig.engine()
+    party = run(engine.start(name="Quiet", speakers=["A"], by=ANA))
+    run(engine.end(party["id"]))
+    assert rig.reverted[-1]["rooms"]["A"]["transport"]["media_uri"] == AIRPLAY
+
+
+def test_a_quiet_party_already_on_its_queue_is_left_there(rig, monkeypatch):
+    _loaded(monkeypatch, "x-rincon-queue:A#0")
+    engine = rig.engine()
+    run(engine.start(name="Quiet", speakers=["A"], by=ANA))
+    assert not any(c[0] == "set_source" for c in rig.commands.calls)
+
+
+def test_starting_music_is_not_pointed_at_the_queue(rig, monkeypatch):
+    _loaded(monkeypatch, AIRPLAY)
+    rig.commands._queueable = lambda uri: not uri.startswith("x-sonosapi-stream:")
+    engine = rig.engine()
+    run(engine.start(name="TV", speakers=["A"], by=ANA, music={"kind": "tv", "source": "A"}))
+    run(engine.start(name="Line", speakers=["B"], by=ANA, music={"kind": "line_in"}))
+    run(engine.start(name="Radio", speakers=["C"], by=ANA,
+                     music={"kind": "item", "uri": "x-sonosapi-stream:s1", "title": "R"}))
+    assert not any(c[0] == "set_source" for c in rig.commands.calls)
+    assert [p["own_source"] for p in engine.list()] == [
+        "x-sonos-htastream:A:spdif", "x-rincon-stream:B", "x-sonosapi-stream:s1"]
+
+
+# -- a song added while the lead plays something else -------------------------
+
+
+def _party_on_airplay(rig):
+    """A party whose lead is on AirPlay and seen so: one from before the fix,
+    which took what its lead had loaded as its own."""
+    engine = rig.engine()
+    party = run(engine.start(name="One", speakers=["A", "B"], by=ANA))
+    held = engine._parties[party["id"]]
+    held.own_source, held.seen = AIRPLAY, True
+    _plays(rig, "A", AIRPLAY)
+    rig.commands.calls.clear()
+    return engine, party["id"]
+
+
+def test_a_song_added_off_the_queue_switches_the_lead_to_it(rig):
+    engine, pid = _party_on_airplay(rig)
+    assert run(engine.play_added(pid, "x-file:9", {"FirstTrackNumberEnqueued": "3"})) is True
+    assert rig.commands.calls == [("set_source", "A", "x-rincon-queue:A#0"),
+                                  ("seek_track", "A", 3), ("play", "A")]
+    held = engine._parties[pid]
+    assert held.own_source is None and held.seen is False and held.state == "playing"
+    # the report still on its way from before the switch drops nobody
+    run(engine.on_state({"type": "zone"}))
+    assert rig.notices == [] and engine.list()[0]["speakers"] == ["A", "B"]
+    _plays(rig, "A", "x-rincon-queue:A#0")
+    run(engine.on_state({"type": "zone"}))
+    assert rig.notices == [] and engine._parties[pid].seen is True
+
+
+def test_a_song_added_off_the_queue_is_found_in_the_queue(rig, monkeypatch):
+    _with_queues(rig, monkeypatch, {"A": [{"uri": "x-file:9", "metadata": ""}, {"uri": "x-file:1", "metadata": ""},
+                                          {"uri": "x-file:9", "metadata": ""}]})
+    engine, pid = _party_on_airplay(rig)
+    run(engine.play_added(pid, "x-file:9"))
+    assert ("seek_track", "A", 3) in rig.commands.calls     # the copy just added: the last
+    engine._switched.clear()                                # as if the switch window had passed
+    run(engine.play_added(pid, "x-file:1", position=2))
+    assert ("seek_track", "A", 2) in rig.commands.calls
+
+
+def test_a_song_added_on_the_queue_only_queues(rig):
+    engine, pid = _party_on_airplay(rig)
+    _plays(rig, "A", "x-rincon-queue:A#0")
+    assert run(engine.play_added(pid, "x-file:9", {"FirstTrackNumberEnqueued": "3"})) is False
+    assert rig.commands.calls == []
 
 
 def test_a_party_seen_before_a_restart_follows_reality(rig):
@@ -710,3 +840,40 @@ def test_kept_queue_is_not_put_on_a_speaker_whose_queue_could_not_be_written_dow
     assert put == [] and not any(c[0] in ("set_source", "play") for c in rig.commands.calls)
     listed = engine.get(party["id"])
     assert listed["speakers"] == ["C"] and listed["kept_queue"] == 1   # kept for later
+
+
+def test_a_song_added_during_live_sound_only_queues(rig):
+    engine, pid = _party_on_airplay(rig)
+    _plays(rig, "A", "x-rincon-mp3radio://10.0.0.5:8000/api/home/live/k1.mp3")
+    assert run(engine.play_added(pid, "x-file:9", {"FirstTrackNumberEnqueued": "3"})) is False
+    assert rig.commands.calls == []
+
+
+def test_adds_right_after_a_switch_only_queue(rig, monkeypatch):
+    # The controller still reports AirPlay just after the party's own switch:
+    # a second add must not switch again and skip the first song.
+    engine, pid = _party_on_airplay(rig)
+    clock = [1000.0]
+    monkeypatch.setattr(parties.time, "monotonic", lambda: clock[0])
+    assert run(engine.play_added(pid, "x-file:9", {"FirstTrackNumberEnqueued": "3"})) is True
+    assert run(engine.play_added(pid, "x-file:10", {"FirstTrackNumberEnqueued": "4"})) is False
+    assert rig.commands.calls == [("set_source", "A", "x-rincon-queue:A#0"),
+                                  ("seek_track", "A", 3), ("play", "A")]
+    # once the window has passed, a lead still on another source is switched again
+    clock[0] += parties.SWITCH_GRACE + 1
+    rig.commands.calls.clear()
+    assert run(engine.play_added(pid, "x-file:11", {"FirstTrackNumberEnqueued": "5"})) is True
+    assert ("seek_track", "A", 5) in rig.commands.calls
+
+
+def test_the_queue_reported_ends_the_window(rig, monkeypatch):
+    engine, pid = _party_on_airplay(rig)
+    monkeypatch.setattr(parties.time, "monotonic", lambda: 1000.0)
+    run(engine.play_added(pid, "x-file:9", {"FirstTrackNumberEnqueued": "3"}))
+    _plays(rig, "A", "x-rincon-queue:A#0")
+    run(engine.on_state({"type": "zone"}))
+    _plays(rig, "A", "x-sonos-htastream:A:spdif")     # someone else, later: the party lets go
+    run(engine.on_state({"type": "zone"}))
+    assert [n["zone"] for n in rig.notices] == ["A", "B"]
+    assert pid not in engine._switched
+

@@ -230,3 +230,25 @@ def test_token_bucket_refills(monkeypatch):
     now[0] += 3600
     assert all(bucket.allow("a") for _ in range(6))   # capped at capacity
     assert not bucket.allow("a")
+
+
+async def test_youtube_add_while_the_lead_is_on_airplay_plays_it(yt):
+    pid = await _party()
+    yt.ctl.zones["A"].transport = SimpleNamespace(
+        media_uri="x-sonos-vli:RINCON_C43875C3DCEC01400:1,airplay:04470cd8")
+    yt.cmds.calls.clear()
+    r = await client(GUEST).request("POST", f"/api/parties/{pid}/youtube", {"video": VID})
+    assert r.status == 200
+    uri = yt.ctl.queues["A"][0]["uri"]
+    assert yt.cmds.calls == [("add", "A", uri), ("set_source", "A", "x-rincon-queue:A#0"),
+                             ("seek_track", "A", 1), ("play", "A")]
+    await client(GUEST).request("POST", f"/api/parties/{pid}/transport/next")
+    assert yt.cmds.calls[-1] == ("next", "A")
+    assert yt.ctl.zones["A"].transport.media_uri == "x-rincon-queue:A#0"
+
+
+async def test_youtube_add_on_the_queue_only_enqueues(yt):
+    pid = await _party()
+    yt.cmds.calls.clear()
+    await client(GUEST).request("POST", f"/api/parties/{pid}/youtube", {"video": VID})
+    assert [c[0] for c in yt.cmds.calls] == ["add"]
