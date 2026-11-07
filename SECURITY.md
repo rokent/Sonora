@@ -4,9 +4,19 @@ Let's be safe!
 
 ## On Logins
 
-**Sonora has no login of its own. Anyone who can reach it on the network in a browser can control your speakers.**
+**By default Sonora has no login. Anyone who can reach it on the network in a browser can control your speakers.**
 
 That's a decision, not an oversight.  This is how Sonos' official apps behave (a huge convenience for the user), so Sonora does the same.
+
+This fork can switch logins on. Set `SONORA_OIDC_ISSUER` and Sonora asks people to sign in through your Authentik (or another OIDC provider). Setup is in [docs/authentik.md](docs/authentik.md). With logins on:
+
+- **Users** sign in with their own account. A session lasts 30 days. You can limit access to one group with `SONORA_OIDC_GROUP`.
+- **Guests** use a secret link (`/join?token=...`), usually shown as a QR code. A guest session lasts 12 hours and can do less than a user. Making a new link ends all guest sessions that used the old one.
+- **Home Assistant** uses a token. Keep it secret like a password.
+
+If `SONORA_OIDC_ISSUER` is not set, logins are off, nobody is asked to sign in, and everyone is treated as "Local". That is the same as upstream.
+
+Only set `SONORA_TRUST_PROXY=1` when Sonora is behind a reverse proxy you control. Otherwise it may trust forwarded headers that anyone could fake.
 
 ## Environments
 
