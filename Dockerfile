@@ -39,9 +39,12 @@ RUN useradd --system --uid 10001 --create-home --home-dir /home/sonora sonora \
 # Node the frontend builds with (Debian glibc, so it runs on python-slim once
 # libatomic1, the one library the slim image lacks, is there). ffmpeg feeds
 # the TV-mode visualizer (backend/home/analysis.py); without it Sonora falls
-# back to the approximate visuals.
+# back to the approximate visuals. shairport-sync is the AirPlay receiver
+# (backend/home/airplay.py); it announces itself through avahi only, so the
+# entrypoint runs dbus and avahi in the container (host networking).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libatomic1 ffmpeg \
+      shairport-sync avahi-daemon dbus \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=noderuntime /usr/local/bin/node /usr/local/bin/node
 

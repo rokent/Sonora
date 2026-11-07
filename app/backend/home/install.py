@@ -76,5 +76,8 @@ def install(app: FastAPI) -> None:
     app.include_router(live_routes.router)
     from . import files  # dropped music files for speakers (Phase 4)
     app.include_router(files.router)
+    from . import airplay  # AirPlay receivers feeding live sound (Phase 4)
+    app.include_router(airplay.router)
+    airplay.attach(app)
     from . import analysis  # /ws/visual: TV mode's exact visuals (Phase 3)
     app.include_router(analysis.router)

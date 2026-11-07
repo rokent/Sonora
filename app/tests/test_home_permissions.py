@@ -124,6 +124,7 @@ EXPECTED_GUEST_READS = {
     ("GET", "/api/parties"),
     ("GET", "/api/parties/{party_id}/queue"),
     ("GET", "/api/youtube/search"),
+    ("GET", "/api/airplay/receivers"),
     ("GET", "/api/themes"),
     ("GET", "/api/themes/schema"),
     ("GET", "/api/themes/reference"),
