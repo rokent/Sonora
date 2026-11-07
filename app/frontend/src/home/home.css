@@ -232,3 +232,11 @@ a.home-join__go { text-align: center; text-decoration: none; }
 .hp-video--full .hp-video__box { width: 100%; height: 100%; aspect-ratio: auto; border-radius: 0; }
 .hp-vol--video { grid-template-columns: minmax(116px, 30%) 1fr 4.5em; }
 .hp-browser:empty { display: none; }
+/* --- Phase 4: send a tab's sound, drop files ----------------------------- */
+.hp-send { display: flex; flex-direction: column; gap: 6px; }
+.hp-drop {
+  display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 20px 12px;
+  text-align: center; border: 2px dashed var(--t-border, rgba(127, 127, 127, 0.4)); border-radius: 12px;
+}
+.hp-drop--over { border-color: var(--t-accent, currentColor); background: var(--t-surface, rgba(127, 127, 127, 0.08)); }
+.hp-progress { display: block; width: 100%; height: 6px; margin-top: 4px; accent-color: var(--t-accent, currentColor); }

@@ -58,6 +58,7 @@ GUEST: list[tuple[str, re.Pattern]] = [
     _rule("GET", r"/api/state"),
     _rule("GET", r"/ws"),
     _rule("GET", r"/ws/visual"),                 # the party's visualizer frames
+    _rule("GET", r"/ws/tabsound"),               # send a tab's sound (running parties only, checked there)
     _rule("GET", r"/party(/.*)?"),                # the party page shell
     _rule("GET", r"/api/home/config"),
     _rule("GET", r"/api/parties"),
@@ -127,7 +128,7 @@ def _principal(connection) -> Principal | None:
 
 def _is_page(method: str, path: str) -> bool:
     """A browser loading a page, as opposed to the interface calling the API."""
-    return (method in ("GET", "HEAD") and path not in ("/ws", "/ws/visual")
+    return (method in ("GET", "HEAD") and path not in ("/ws", "/ws/visual", "/ws/tabsound")
             and not path.startswith(("/api/", "/auth/")))
 
 
@@ -160,8 +161,9 @@ async def guard(request: Request, call_next):
 
 
 def ws_allowed(websocket) -> bool:
-    """Whether this socket's principal may open ``/ws`` (or ``/ws/visual``):
-    users, guests and displays may. HTTP middleware never
+    """Whether this socket's principal may open ``/ws`` (or ``/ws/visual``,
+    ``/ws/tabsound``): users, guests and displays may open ``/ws`` and
+    ``/ws/visual``; users and guests ``/ws/tabsound``. HTTP middleware never
     sees a socket, so the endpoint asks this itself."""
     principal = _principal(websocket)
     websocket.state.principal = principal

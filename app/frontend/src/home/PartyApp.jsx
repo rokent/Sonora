@@ -15,6 +15,8 @@ import GuestPass from './GuestPass.jsx'
 import HaTokens from './HaTokens.jsx'
 import TvSettings from './TvSettings.jsx'
 import DisplayLinks from './DisplayLinks.jsx'
+import WindowsSound from './WindowsSound.jsx'
+import AirPlayNames from './AirPlayNames.jsx'
 import './home.css'
 
 /** Parties and presets, refetched whenever the server says they changed. */
@@ -81,6 +83,10 @@ export default function PartyApp() {
     screen = <TvSettings />
   } else if (sub === '/displays' && isUser) {
     screen = <DisplayLinks data={data} />
+  } else if (sub === '/windows-sound' && isUser) {
+    screen = <WindowsSound data={data} />
+  } else if (sub === '/airplay' && isUser) {
+    screen = <AirPlayNames />
   } else {
     back = false
     screen = <PartyList data={data} isUser={isUser} />

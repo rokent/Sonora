@@ -88,6 +88,12 @@ const ERROR_KEYS = {
   no_audio: 'home.youtube.error.noAudio',
   youtube_failed: 'home.youtube.error.failed',
   bad_query: 'home.youtube.error.badQuery',
+  unsupported_type: 'home.files.error.type',
+  too_large: 'home.files.error.tooLarge',
+  party_full: 'home.files.error.partyFull',
+  disk_full: 'home.files.error.diskFull',
+  empty: 'home.files.error.empty',
+  network: 'home.files.error.network',
 }
 
 /** Words for a failed party request. */

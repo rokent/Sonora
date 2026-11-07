@@ -1,6 +1,7 @@
 // The household features: parties, presets, the guest pass, Home Assistant
 // tokens, and who is signed in. Thin wrappers over the shared request helper.
 import { request } from '../lib/api.js'
+import { withBase } from '../lib/base.js'
 
 const id = (value) => encodeURIComponent(value)
 const post = (path, body) => request(path, { method: 'POST', body: body ?? {} })
@@ -39,6 +40,42 @@ export const homeApi = {
   updateDisplay: (did, body) => request(`/api/displays/${id(did)}`, { method: 'PUT', body }),
   deleteDisplay: (did) => request(`/api/displays/${id(did)}`, { method: 'DELETE' }),
   deleteHaToken: (tid) => request(`/api/ha/tokens/${id(tid)}`, { method: 'DELETE' }),
+  screamSources: () => request('/api/scream/sources'),
+  mapScream: (ip, target) => request(`/api/scream/sources/${id(ip)}`, { method: 'PUT', body: { target } }),
+  airplayReceivers: () => request('/api/airplay/receivers'),
+}
+
+/**
+ * Upload one music file into a party's queue: the body is the file itself.
+ * Resolves with the server's answer ({ok, item}); rejects with
+ * {status, kind, body} (kind is the server's error word, 'network' or
+ * 'aborted'), which errorText understands. `onProgress(0..1)` follows the
+ * upload; `signal` aborts it.
+ */
+export function uploadPartyFile(pid, file, { next = false, onProgress, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    const query = `name=${id(file.name || '')}${next ? '&next=true' : ''}`
+    xhr.open('POST', withBase(`/api/parties/${id(pid)}/files?${query}`))
+    xhr.responseType = 'text'
+    const fail = (status, kind, body = null) => reject({ status, kind, body: body || { error: kind } })
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
+    }
+    xhr.onload = () => {
+      let body = null
+      try { body = xhr.responseText ? JSON.parse(xhr.responseText) : null } catch { body = null }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(body)
+      else fail(xhr.status, body?.error || `http_${xhr.status}`, body)
+    }
+    xhr.onerror = () => fail(0, 'network')
+    xhr.onabort = () => fail(0, 'aborted')
+    if (signal) {
+      if (signal.aborted) { fail(0, 'aborted'); return }
+      signal.addEventListener('abort', () => xhr.abort(), { once: true })
+    }
+    xhr.send(file)
+  })
 }
 
 /** Sign the guest in with the pass token and a first name. */
