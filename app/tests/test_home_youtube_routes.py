@@ -28,7 +28,7 @@ def yt(rig, monkeypatch):
             raise state.info_error
         return VIDEO
 
-    async def audio_source(video_id):
+    async def audio_source(video_id, priority=False):
         state.probed.append(video_id)
         if state.audio_error:
             raise state.audio_error
@@ -186,3 +186,47 @@ async def test_user_play_next_is_attributed_with_a_fresh_key(yt):
     assert len(set(uris)) == 2                      # same video, two keys
     items = (await u.request("GET", f"/api/parties/{pid}/queue")).json()["items"]
     assert [i["added_by"] for i in items] == [{"id": "sub-1", "name": "Tudor"}] * 2
+
+
+async def test_search_is_rate_limited_per_principal(yt):
+    g = client(GUEST)
+    for _ in range(10):
+        assert (await g.request("GET", "/api/youtube/search?q=a")).status == 200
+    r = await g.request("GET", "/api/youtube/search?q=a")
+    assert r.status == 429 and r.json() == {"error": "slow_down"}
+    assert r.headers.get("retry-after") == "10"
+    assert len(yt.yt.searched) == 10
+    # Someone else is not held back.
+    assert (await client(OTHER_GUEST).request("GET", "/api/youtube/search?q=a")).status == 200
+
+
+async def test_add_is_rate_limited_and_queue_untouched(yt):
+    pid = await _party()
+    g = client(GUEST)
+    for _ in range(6):
+        r = await g.request("POST", f"/api/parties/{pid}/youtube", {"video": VID})
+        assert r.status == 200
+    r = await g.request("POST", f"/api/parties/{pid}/youtube", {"video": VID})
+    assert r.status == 429 and r.json() == {"error": "slow_down"}
+    assert len(yt.ctl.queues["A"]) == 6 and len(yt.yt.probed) == 6
+    assert (await client(USER).request("POST", f"/api/parties/{pid}/youtube",
+                                       {"video": VID})).status == 200
+
+
+def test_token_bucket_refills(monkeypatch):
+    from backend.home import ratelimit
+
+    now = [1000.0]
+    monkeypatch.setattr(ratelimit.time, "monotonic", lambda: now[0])
+    bucket = ratelimit.TokenBucket(6)          # one token per 10 s
+    assert all(bucket.allow("a") for _ in range(6))
+    assert not bucket.allow("a")
+    assert bucket.allow("b")
+    now[0] += 9.9
+    assert not bucket.allow("a")
+    now[0] += 0.2
+    assert bucket.allow("a")
+    assert not bucket.allow("a")
+    now[0] += 3600
+    assert all(bucket.allow("a") for _ in range(6))   # capped at capacity
+    assert not bucket.allow("a")

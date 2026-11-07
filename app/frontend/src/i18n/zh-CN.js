@@ -1317,6 +1317,7 @@ export default {
   'home.youtube.error.noAudio': 'This video has no sound the speakers can play.',
   'home.youtube.error.failed': 'YouTube did not answer. Try again in a moment.',
   'home.youtube.error.badQuery': 'Type up to 100 characters to search.',
+  'home.youtube.error.slowDown': 'Too many YouTube requests. Wait a few seconds and try again.',
   'home.video.title': 'Video',
   'home.video.show': 'Show video',
   'home.video.hide': 'Hide video',

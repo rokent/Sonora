@@ -88,6 +88,7 @@ const ERROR_KEYS = {
   no_audio: 'home.youtube.error.noAudio',
   youtube_failed: 'home.youtube.error.failed',
   bad_query: 'home.youtube.error.badQuery',
+  slow_down: 'home.youtube.error.slowDown',
 }
 
 /** Words for a failed party request. */
