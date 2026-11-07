@@ -44,6 +44,10 @@ AirPlay receivers (each running party and each room as an AirPlay speaker)
 use ports 5100-5199 (TCP and UDP) and mDNS. Turn **AirPlay receivers** off on
 the **Configuration** tab if you don't want them.
 
+The Windows sound receiver (a PC's sound sent with the Scream driver) listens
+on UDP port 4010. Turn **Windows sound receiver** off on the
+**Configuration** tab if you don't want it, or if that port is taken.
+
 ## Your data
 
 Sonora keeps its sign-ins to Sonos and to music services, and any themes you

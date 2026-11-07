@@ -15,6 +15,8 @@ boot: auto
 # Sonora finds the speakers by multicast and they report every change by
 # calling it back, so it has to be on the home network itself.
 host_network: true
+# No `init:` key: the Supervisor's default (init: true) already runs Docker's
+# tiny init as PID 1, which reaps the ffmpeg / shairport-sync children.
 # The page in Home Assistant's sidebar, for every user, not only admins. Its
 # port is the Supervisor's choice (0), so moving the web port below cannot
 # break it; Sonora asks the Supervisor for it (backend/haoptions.py), which is
@@ -38,8 +40,12 @@ options:
   web_port: 50205
   event_port: 50206
   airplay: true
+  scream: true
 schema:
   web_port: port
   event_port: port
   # false turns the AirPlay receivers off (docker-entrypoint.sh reads it).
   airplay: bool
+  # false turns the Windows sound (Scream) receiver on UDP 4010 off
+  # (backend/haoptions.py sets SONORA_SCREAM_PORT=0).
+  scream: bool

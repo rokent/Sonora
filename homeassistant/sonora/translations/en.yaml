@@ -14,3 +14,8 @@ configuration:
       Show each running party and each room as an AirPlay speaker, so phones
       and computers can send their sound to it. Uses ports 5100-5199 and
       mDNS.
+  scream:
+    name: Windows sound receiver
+    description: >-
+      Play what a Windows PC with the Scream driver sends (UDP port 4010,
+      multicast 239.255.77.77 or unicast) on a party or room.

@@ -4,6 +4,9 @@ services:
     container_name: sonora
     restart: unless-stopped
     network_mode: host
+    # A tiny init as PID 1: reaps the ffmpeg / shairport-sync / dbus-send
+    # children Sonora starts and passes stop signals on.
+    init: true
     environment:
       # The port the page is served on. With host networking there is no
       # port mapping, so change it here rather than with `ports:`.
@@ -30,6 +33,9 @@ services:
       # AirPlay receivers (each running party and room as an AirPlay speaker,
       # ports 5100-5199 TCP/UDP + mDNS; see docs/airplay.md). 0 turns them off.
       # SONORA_AIRPLAY: 0
+      # Windows sound (Scream) receiver on UDP 4010 (multicast 239.255.77.77
+      # or unicast; see docs/windows-sound.md). 0 turns it off.
+      # SONORA_SCREAM_PORT: 0
     volumes:
       - ./sonora-data:/data
 
