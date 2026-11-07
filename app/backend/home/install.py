@@ -78,3 +78,26 @@ def install(app: FastAPI) -> None:
     app.include_router(files.router)
     from . import analysis  # /ws/visual: TV mode's exact visuals (Phase 3)
     app.include_router(analysis.router)
+    from . import scream_routes  # Windows network sound card (Phase 4)
+    app.include_router(scream_routes.router)
+    _start_scream_with(app)
+
+
+def _start_scream_with(app: FastAPI) -> None:
+    """Open the Scream port when the app starts and close it when it stops, by
+    wrapping the app's lifespan (so ``main.py`` stays untouched)."""
+    from contextlib import asynccontextmanager
+
+    from . import scream
+    inner = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(a):
+        async with inner(a) as state:
+            await scream.start()
+            try:
+                yield state
+            finally:
+                await scream.stop()
+
+    app.router.lifespan_context = lifespan
