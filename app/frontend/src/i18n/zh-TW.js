@@ -1231,4 +1231,12 @@ export default {
   's2.colBuy': '操作',
   's2.buyNow': '立即購買',
   's2.updateNow': '立即更新',
+  'home.join.title': 'Join the party',
+  'home.join.name': 'Your first name',
+  'home.join.go': 'Join',
+  'home.join.bad': 'This invite link is no longer valid. Ask the host for a new one.',
+  'home.parties.button': 'Parties',
+  'home.parties.title': 'Parties',
+  'home.join.badName': 'Please enter a first name the host can recognise.',
+  'home.join.network': 'Could not reach the speakers. Check your connection and try again.',
 }

@@ -6,7 +6,7 @@
 // fault. Callers get a typed
 // error rather than having to re-parse the response.
 
-import { PAGE_ID } from './base.js'
+import { PAGE_ID, withBase } from './base.js'
 import { browserSleep } from './browserSleep.js'
 import { browserQueue } from './browserQueue.js'
 import { browserItem } from './browserItem.js'
@@ -24,6 +24,11 @@ export class ApiError extends Error {
     this.service = payload?.service
     this.action = payload?.action
     this.hint = payload?.hint
+  }
+
+  /** A guest asked for something only the household's own people may do. */
+  get isForbidden() {
+    return this.kind === 'forbidden'
   }
 
   get isConflict() {
@@ -75,7 +80,7 @@ function worded(data) {
   return data
 }
 
-async function request(path, { method = 'GET', body } = {}) {
+export async function request(path, { method = 'GET', body } = {}) {
   const headers = {}
   if (body) headers['Content-Type'] = 'application/json'
   if (locale) headers['Accept-Language'] = locale
@@ -97,6 +102,13 @@ async function request(path, { method = 'GET', body } = {}) {
       payload = await response.json()
     } catch {
       // A non-JSON error body still needs to surface as an ApiError.
+    }
+    // Sign-in is required and this browser has none: go and sign in, and come
+    // back to this page. /api/me is the one call that asks without being sent.
+    if (response.status === 401 && payload?.error === 'login' && path !== '/api/me') {
+      try {
+        location.assign(withBase('/auth/login?next=' + encodeURIComponent('/' + location.pathname.replace(/^\/+/, ''))))
+      } catch { /* no navigation: the error below still surfaces */ }
     }
     throw new ApiError(response.status, payload)
   }

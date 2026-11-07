@@ -442,6 +442,7 @@
    "border",
    "border-strong",
    "critical",
+   "danger",
    "fair",
    "fg",
    "fg-dim",

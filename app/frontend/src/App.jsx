@@ -3,6 +3,11 @@ import { useTheme } from './lib/theme.jsx'
 import { useSystem } from './lib/store.jsx'
 import Splash from './components/Splash.jsx'
 import LayoutShell from './parts/LayoutShell.jsx'
+import PartyApp from './home/PartyApp.jsx'
+import { withBase } from './lib/base.js'
+import { useMe } from './home/useMe.js'
+import { useI18n } from './i18n/index.jsx'
+import './home/home.css'
 
 // How long the first load may take before "Looking for speakers" is shown.
 // The snapshot normally arrives well inside a second, and flashing that
@@ -11,6 +16,20 @@ import LayoutShell from './parts/LayoutShell.jsx'
 const LOOKING_GRACE_MS = 1500
 
 export default function App() {
+  const me = useMe()
+  // Until we know who is looking, a guest must not glimpse the theme shell.
+  if (me.loading) return <div style={{ minHeight: '100%', background: 'var(--t-bg, #f6f6f7)' }} />
+  // A guest has the party screens and nothing else.
+  if (me.principal?.kind === 'guest') return <PartyApp />
+  return <Household partiesLink={!!(me.auth && me.principal?.kind === 'user')} />
+}
+
+function PartiesButton() {
+  const { t } = useI18n()
+  return <a className="home-parties-button" href={withBase('/party')}>{t('home.parties.button')}</a>
+}
+
+function Household({ partiesLink }) {
   const { theme } = useTheme()
   const { loading, error, zoneList } = useSystem()
   const [pastGrace, setPastGrace] = useState(false)
@@ -37,7 +56,11 @@ export default function App() {
   // package cannot bring code; LayoutShell draws it and supplies the overlays a
   // package cannot. Resolved here rather than in lib/theme.jsx, which would
   // have to import it and close an import cycle back onto itself.
-  if (theme.layout) return <LayoutShell layout={theme.layout} theme={theme} />
   const Shell = theme.Shell
-  return <Shell />
+  return (
+    <>
+      {theme.layout ? <LayoutShell layout={theme.layout} theme={theme} /> : <Shell />}
+      {partiesLink && <PartiesButton />}
+    </>
+  )
 }
