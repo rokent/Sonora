@@ -59,8 +59,12 @@ async def update_tv(tv_id: str, body: dict):
 
 @router.delete("/api/tvs/{tv_id}")
 async def delete_tv(tv_id: str):
+    tv = tvs.store().get(tv_id)
     if not tvs.store().remove(tv_id):
         return _answer(Refused(404, "not_found", message=tv_id))
+    if tv and tv.get("display_id"):                    # its display link goes with it
+        from .auth import DisplayLinks
+        DisplayLinks().delete(tv["display_id"])
     return {"ok": True}
 
 

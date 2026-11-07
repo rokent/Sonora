@@ -9,6 +9,7 @@ import Art from '../components/Art.jsx'
 import * as Icon from '../components/Icons.jsx'
 import { homeApi } from './api.js'
 import AddSongs from './AddSongs.jsx'
+import ShowOnTv from './ShowOnTv.jsx'
 import { useMe } from './useMe.js'
 import {
   RoomChecklist, Sheet, VolumeSlider, errorText, go, holders, partyNowPlaying, partyRooms,
@@ -281,6 +282,7 @@ export default function PartyView({ id, data, isUser }) {
 
       {isUser && (
         <section className="hp-section hp-actions">
+          <ShowOnTv party={party} />
           <button type="button" className="hp-btn hp-btn--wide" disabled={!speakers.length}
                   onClick={() => { setPresetName(party.name || ''); setAsk('preset') }}>{t('home.party.saveAsPreset')}</button>
           <button type="button" className="hp-btn hp-btn--danger hp-btn--wide" onClick={() => setAsk('end')}>{t('home.party.end')}</button>

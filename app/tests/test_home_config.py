@@ -41,28 +41,36 @@ def body(response):
 
 def test_nothing_configured_is_null():
     for p in (Principal("user", "u", "Ana"), Principal("guest", "g", "Bo")):
-        assert body(get(p)) == {"remote_browser": None}
+        assert body(get(p))["remote_browser"] is None
 
 
 def test_user_gets_full_control_url_guest_gets_view_url(monkeypatch):
     monkeypatch.setenv("SONORA_NEKO_URL", "https://neko.test/?pwd=admin")
     monkeypatch.setenv("SONORA_NEKO_VIEW_URL", "https://neko.test/?pwd=view")
-    assert body(get(Principal("user", "u", "Ana"))) == {"remote_browser": {"url": "https://neko.test/?pwd=admin"}}
-    assert body(get(Principal("guest", "g", "Bo"))) == {"remote_browser": {"url": "https://neko.test/?pwd=view"}}
+    assert body(get(Principal("user", "u", "Ana")))["remote_browser"] == {"url": "https://neko.test/?pwd=admin"}
+    assert body(get(Principal("guest", "g", "Bo")))["remote_browser"] == {"url": "https://neko.test/?pwd=view"}
 
 
 def test_guest_without_view_url_gets_null(monkeypatch):
     monkeypatch.setenv("SONORA_NEKO_URL", "https://neko.test/?pwd=admin")
-    assert body(get(Principal("guest", "g", "Bo"))) == {"remote_browser": None}
+    assert body(get(Principal("guest", "g", "Bo")))["remote_browser"] is None
 
 
 def test_service_principal_gets_null(monkeypatch):
     monkeypatch.setenv("SONORA_NEKO_URL", "https://neko.test/?pwd=admin")
     monkeypatch.setenv("SONORA_NEKO_VIEW_URL", "https://neko.test/?pwd=view")
-    assert body(get(Principal("service", "ha", "Home Assistant"))) == {"remote_browser": None}
+    assert body(get(Principal("service", "ha", "Home Assistant")))["remote_browser"] is None
 
 
 def test_display_gets_no_remote_browser(monkeypatch):
     monkeypatch.setenv("SONORA_NEKO_URL", "https://neko.test/?pwd=admin")
     monkeypatch.setenv("SONORA_NEKO_VIEW_URL", "https://neko.test/?pwd=view")
-    assert body(get(Principal("display", "d1", "TV"))) == {"remote_browser": None}
+    assert body(get(Principal("display", "d1", "TV")))["remote_browser"] is None
+
+
+def test_visuals_mode_for_every_principal(monkeypatch):
+    from backend.home import analysis
+    monkeypatch.setattr(analysis, "visuals_mode", lambda: "approximate")
+    for p in (Principal("user", "u", "Ana"), Principal("guest", "g", "Bo"),
+              Principal("display", "d1", "TV"), Principal("service", "ha", "HA")):
+        assert body(get(p))["visuals"] == "approximate"

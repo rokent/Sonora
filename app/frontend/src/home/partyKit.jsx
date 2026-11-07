@@ -81,6 +81,9 @@ const ERROR_KEYS = {
   forbidden: 'home.error.forbidden',
   not_found: 'home.error.notFound',
   speaker_taken: 'home.error.taken',
+  tv_unreachable: 'home.tv.unreachable',
+  tv_needs_pairing: 'home.tv.needsPairing',
+  tv_failed: 'home.tv.failed',
 }
 
 /** Words for a failed party request. */

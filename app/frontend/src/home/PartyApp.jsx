@@ -13,6 +13,8 @@ import StartParty from './StartParty.jsx'
 import PresetEditor from './PresetEditor.jsx'
 import GuestPass from './GuestPass.jsx'
 import HaTokens from './HaTokens.jsx'
+import TvSettings from './TvSettings.jsx'
+import DisplayLinks from './DisplayLinks.jsx'
 import './home.css'
 
 /** Parties and presets, refetched whenever the server says they changed. */
@@ -32,6 +34,22 @@ function useParties() {
   return { ...data, reload }
 }
 
+const TV_RESULT_MS = 8000
+
+/** What became of a TV show that ran in the background, for a few seconds. */
+function useTvResult(isUser) {
+  const { lastTvResult } = useSystem()
+  const opened = useRef(Date.now())
+  const [shown, setShown] = useState(null)
+  useEffect(() => {
+    if (!isUser || !lastTvResult || lastTvResult.at < opened.current) return undefined
+    setShown(lastTvResult)
+    const timer = setTimeout(() => setShown(null), TV_RESULT_MS)
+    return () => clearTimeout(timer)
+  }, [lastTvResult, isUser])
+  return shown
+}
+
 export default function PartyApp() {
   const { t } = useI18n()
   const me = useMe()
@@ -40,6 +58,7 @@ export default function PartyApp() {
   const isGuest = me.principal?.kind === 'guest'
   // With sign-in switched off everyone is the household.
   const isUser = me.principal?.kind === 'user' || (!me.loading && !me.auth && !isGuest)
+  const tvResult = useTvResult(isUser)
 
   const sub = path.replace(/^\/party/, '') || '/'
   let screen = null
@@ -58,6 +77,10 @@ export default function PartyApp() {
     screen = <GuestPass />
   } else if (sub === '/ha-tokens' && isUser) {
     screen = <HaTokens />
+  } else if (sub === '/tvs' && isUser) {
+    screen = <TvSettings />
+  } else if (sub === '/displays' && isUser) {
+    screen = <DisplayLinks data={data} />
   } else {
     back = false
     screen = <PartyList data={data} isUser={isUser} />
@@ -73,6 +96,11 @@ export default function PartyApp() {
         <span className="hp-top__who">{me.principal?.name || ''}</span>
       </header>
       <main className="hp-main">
+        {tvResult && (
+          <div className={tvResult.ok ? 'hp-banner' : 'hp-banner hp-alert'} role={tvResult.ok ? 'status' : 'alert'}>
+            {tvResult.ok ? t('home.tv.resultOk') : errorText(t, { body: { error: tvResult.error } })}
+          </div>
+        )}
         {data.error && !data.loading && <p className="hp-alert" role="alert">{errorText(t, data.error)}</p>}
         {screen}
       </main>

@@ -5,6 +5,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { useI18n } from '../i18n/index.jsx'
 import { useSystem } from '../lib/store.jsx'
 import { homeApi } from './api.js'
+import { TV_MODES, modeKey } from './tvKit.js'
 import { RoomChecklist, Sheet, VolumeSlider, errorText, go, roomsBySystem } from './partyKit.jsx'
 
 export default function PresetEditor({ data, presetId = null }) {
@@ -16,12 +17,14 @@ export default function PresetEditor({ data, presetId = null }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [tvs, setTvs] = useState([])
+  useEffect(() => { homeApi.tvs().then((r) => setTvs(r?.tvs || [])).catch(() => setTvs([])) }, [])
 
   // The form starts from the preset once the list has it.
   useEffect(() => {
     if (form) return
-    if (!presetId) setForm({ name: '', speakers: [], volumes: {} })
-    else if (preset) setForm({ name: preset.name || '', speakers: [...(preset.speakers || [])], volumes: { ...(preset.volumes || {}) } })
+    if (!presetId) setForm({ name: '', speakers: [], volumes: {}, tvId: '', show: 'cover' })
+    else if (preset) setForm({ name: preset.name || '', speakers: [...(preset.speakers || [])], volumes: { ...(preset.volumes || {}) }, tvId: preset.tv?.tv_id || '', show: preset.tv?.show || 'cover' })
   }, [presetId, preset, form])
 
   if (presetId && !preset) {
@@ -47,7 +50,7 @@ export default function PresetEditor({ data, presetId = null }) {
       speakers: form.speakers,
       volumes,
       ...(preset?.music ? { music: preset.music } : {}),
-      ...(preset?.tv ? { tv: preset.tv } : {}),
+      ...(form.tvId ? { tv: { tv_id: form.tvId, show: form.show } } : {}),
     }
     try {
       if (preset) await homeApi.updatePreset(preset.id, body)
@@ -100,6 +103,23 @@ export default function PresetEditor({ data, presetId = null }) {
               </li>
             ))}
           </ul>
+        </>
+      )}
+      <h2 className="hp-h2">{t('home.preset.tv')}</h2>
+      <label className="hp-label" htmlFor="hp-preset-tv">{t('home.tv.which')}</label>
+      <select id="hp-preset-tv" className="hp-input" value={form.tvId}
+              onChange={(e) => setForm((prev) => ({ ...prev, tvId: e.target.value }))}>
+        <option value="">{t('home.preset.noTv')}</option>
+        {tvs.map((tv) => <option key={tv.id} value={tv.id}>{tv.name}</option>)}
+        {form.tvId && !tvs.some((tv) => tv.id === form.tvId) && <option value={form.tvId}>{form.tvId}</option>}
+      </select>
+      {form.tvId && (
+        <>
+          <label className="hp-label" htmlFor="hp-preset-show">{t('home.tv.mode')}</label>
+          <select id="hp-preset-show" className="hp-input" value={form.show}
+                  onChange={(e) => setForm((prev) => ({ ...prev, show: e.target.value }))}>
+            {TV_MODES.map((m) => <option key={m} value={m}>{t(modeKey(m))}</option>)}
+          </select>
         </>
       )}
       {preset?.music?.title && <p className="hp-muted">{t('home.preset.music', { title: preset.music.title })}</p>}

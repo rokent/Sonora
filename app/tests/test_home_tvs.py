@@ -187,10 +187,9 @@ async def test_show_launches_browser_with_token(rig, tv):
                         "mode": "visualizer"}
     assert tv.requests[0]["query"]["token"] == "tok-123"
     await asyncio.sleep(0.05)
-    assert tv.received == [{"method": "ms.channel.emit", "params": {
-        "event": "ed.apps.launch", "to": "host",
-        "data": {"appId": "org.tizen.browser", "action_type": "NATIVE_LAUNCH",
-                 "metaTag": f"http://10.0.0.2:50205/tv?party={party['id']}&mode=visualizer"}}}]
+    sent = tv.received[0]
+    assert sent["params"]["data"]["appId"] == "org.tizen.browser"
+    assert sent["params"]["data"]["metaTag"].startswith("http://10.0.0.2:50205/auth/display?token=")
 
 
 async def test_show_uses_default_mode_and_injectable_url(rig, tv, monkeypatch):
@@ -339,12 +338,43 @@ def test_real_tv_urls():
     assert plain == "ws://192.168.1.50:8001/api/v2/channels/samsung.remote.control?name=U29ub3JhIEhvbWU="
 
 
-def test_default_display_url():
-    tv_ = {"id": "t1"}
-    assert (tvs.display_url_for(tv_, "pa_1", "video", "http://10.0.0.2:50205")
-            == "http://10.0.0.2:50205/tv?party=pa_1&mode=video")
-    assert (tvs.display_url_for(tv_, "a&b=c d", "cover", "http://h")
-            == "http://h/tv?party=a%26b%3Dc+d&mode=cover")
+def test_display_url_is_a_per_tv_link(rig):
+    from backend.home.auth import DisplayLinks
+    made = tvs.store().add({"name": "Living room", "host": "10.0.0.9"})
+    url = tvs.display_url_for(made, "pa_1", "video", "http://10.0.0.2:50205")
+    assert url.startswith("http://10.0.0.2:50205/auth/display?token=")
+    rec = tvs.store().get(made["id"])
+    link = DisplayLinks().get(rec["display_id"])
+    assert link["name"] == "TV: Living room" and (link["party"], link["mode"]) == ("pa_1", "video")
+    # Same link, new party and mode, new address.
+    again = tvs.display_url_for(rec, "pa_2", "cover", "http://10.0.0.3:50205")
+    assert again == url.replace("10.0.0.2", "10.0.0.3")
+    assert len(DisplayLinks().list()) == 1
+    link = DisplayLinks().get(rec["display_id"])
+    assert (link["party"], link["mode"]) == ("pa_2", "cover")
+    # A deleted link is made again.
+    DisplayLinks().delete(rec["display_id"])
+    rec = tvs.store().get(made["id"])
+    third = tvs.display_url_for(rec, "pa_2", "cover", "http://h")
+    assert third != again and len(DisplayLinks().list()) == 1
+
+
+async def test_tv_list_never_returns_the_display_url(rig):
+    made = tvs.store().add({"name": "Den", "host": "10.0.0.9"})
+    tvs.display_url_for(made, "pa_1", "cover", "http://h")
+    r = await client(USER).request("GET", "/api/tvs")
+    text = str(r.json())
+    for key in ("token=", "display_url", "display_id", "auth/display"):
+        assert key not in text
+
+
+async def test_deleting_a_tv_deletes_its_link(rig):
+    from backend.home.auth import DisplayLinks
+    made = tvs.store().add({"name": "Den", "host": "10.0.0.9"})
+    tvs.display_url_for(made, "pa_1", "cover", "http://h")
+    assert len(DisplayLinks().list()) == 1
+    r = await client(USER).request("DELETE", f"/api/tvs/{made['id']}")
+    assert r.status == 200 and DisplayLinks().list() == []
 
 
 # -- which browser ------------------------------------------------------------
@@ -447,8 +477,10 @@ async def test_preset_start_shows_on_tv_in_background(rig, tv):
     assert party["tv"] == "pending" and "tv_error" not in party
     await _settle()
     await asyncio.sleep(0.05)
-    assert tv.received[0]["params"]["data"]["metaTag"].endswith(
-        f"/tv?party={party['id']}&mode=visualizer")
+    from backend.home.auth import DisplayLinks
+    assert "/auth/display?token=" in tv.received[0]["params"]["data"]["metaTag"]
+    link = DisplayLinks().list()[0]
+    assert (link["party"], link["mode"]) == (party["id"], "visualizer")
     assert _results(rig) == [{"type": "tv_result", "party": party["id"], "tv_id": made["id"],
                               "ok": True, "error": None}]
 

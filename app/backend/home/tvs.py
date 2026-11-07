@@ -217,9 +217,27 @@ async def lan_base(host: str) -> str:
 
 
 def display_url_for(tv: dict, party_id: str, mode: str, base_url: str) -> str:
-    """The page a TV opens for ``party_id`` in ``mode``. One function, so it
-    can become a per-TV display link without touching anything else."""
-    return f"{base_url}/tv?{urlencode({'party': party_id, 'mode': mode})}"
+    """The page a TV opens for ``party_id`` in ``mode``: the TV's own display
+    link. It is made on the first show (or when the link was deleted), kept on
+    the TV record with its URL (the URL carries the token, so the record is
+    never returned whole), and pointed at the party and mode on every show."""
+    from .auth import DisplayLinks  # lazy: auth is heavier than this module
+
+    links = DisplayLinks()
+    link = links.get(tv["display_id"]) if tv.get("display_id") else None
+    stored = tv.get("display_url") or ""
+    if link is None or "/auth/display" not in stored:
+        link, token = links.create(f"TV: {tv['name']}"[:40], party=party_id, mode=mode)
+        stored = f"{base_url}/auth/display?{urlencode({'token': token})}"
+        store().set_fields(tv["id"], display_id=link["id"], display_url=stored)
+        return stored
+    if link["party"] != party_id or link["mode"] != mode:
+        links.update(link["id"], party=party_id, mode=mode)
+    tail = stored[stored.index("/auth/display"):]     # the address the TV reaches may change
+    url = f"{base_url}{tail}"
+    if url != stored:
+        store().set_fields(tv["id"], display_url=url)
+    return url
 
 
 def launch_message(url: str, app: str = BROWSER) -> dict:
