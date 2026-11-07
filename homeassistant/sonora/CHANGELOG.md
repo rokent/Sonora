@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.1
+
+* A party now takes its speakers to its own queue when it starts, so Play and Next play the party's songs even if the speaker was on AirPlay, radio or TV before.
+* Adding the first song to a party whose speaker is on another source starts that song.
+
 ## 1.3.0
 
 ### Sonora Home (fork of Sonora 1.2.0)
