@@ -420,3 +420,29 @@ async def test_engine_failure_is_logged_once(rig, monkeypatch, caplog):
         assert r.status == 503 and r.json() == {"error": "parties_unavailable"}
     assert len(made) == 1
     assert sum("could not be made" in rec.getMessage() for rec in caplog.records) == 1
+
+
+async def test_queue_body_is_capped(rig):
+    pid = (await _start()).json()["id"]
+    g = client(GUEST)
+    r = await g.request("POST", f"/api/parties/{pid}/queue", {"uri": "x-file:" + "a" * routes.URI_MAX})
+    assert r.status == 422
+    r = await g.request("POST", f"/api/parties/{pid}/queue",
+                        {"uri": "x-file:1", "metadata": "m" * (routes.METADATA_MAX + 1)})
+    assert r.status == 422
+    ok = await g.request("POST", f"/api/parties/{pid}/queue",
+                         {"uri": "x-file:" + "a" * (routes.URI_MAX - 7), "metadata": "m" * routes.METADATA_MAX})
+    assert ok.status == 200, ok.body
+
+
+async def test_engine_reads_the_speakers_once_it_is_made(rig, tmp_path):
+    import asyncio
+    pid = (await _start(speakers=["A", "B"])).json()["id"]
+    routes.reset()                                    # Sonora restarts ...
+    rig.ctl.callbacks.clear()
+    rig.ctl.lead["B"] = "B"                           # ... and B left while it was down
+    rig.sent.clear()
+    await client(USER).request("GET", "/api/parties")  # the first call makes the engine
+    await asyncio.gather(*list(routes._tasks))
+    assert {"type": "party_notice", "party": pid, "zone": "B", "event": "left"} in rig.sent
+    assert routes.engine().get(pid)["speakers"] == ["A"]

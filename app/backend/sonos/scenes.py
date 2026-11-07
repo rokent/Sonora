@@ -555,6 +555,25 @@ async def _queue_items(commands, host: str) -> list[dict]:
     return items
 
 
+async def put_queue(commands, uuid: str, host: str, queue: list[dict]) -> None:
+    """Empty ``uuid``'s queue and fill it with ``queue`` (``{uri, metadata}``
+    pairs as ``_queue_items`` reads them), sixteen at a time, one by one
+    where the speaker refuses a batch."""
+    await commands.clear_queue(uuid)
+    for i in range(0, len(queue), 16):
+        batch = queue[i:i + 16]
+        try:
+            await commands.soap.call(host, const.AV_TRANSPORT, "AddMultipleURIsToQueue", {
+                "InstanceID": 0, "UpdateID": 0, "NumberOfURIs": len(batch),
+                "EnqueuedURIs": " ".join(q["uri"] for q in batch),
+                "EnqueuedURIsMetaData": " ".join(q["metadata"] for q in batch),
+                "ContainerURI": "", "ContainerMetaData": "",
+                "DesiredFirstTrackNumberEnqueued": 0, "EnqueueAsNext": 0}, timeout=20.0)
+        except SoapFault:
+            for q in batch:
+                await commands.add_to_queue(uuid, q["uri"], q["metadata"])
+
+
 async def _snapshot(controller, commands, scene: dict, uuids: list[str],
                     queues: set[str], eqs: set[str]) -> dict:
     """What the named rooms are now, enough to put them back: levels, the
@@ -905,19 +924,7 @@ async def revert(controller, commands, before: dict) -> dict:
                 fail(uuid, "play", exc)
         if queue is not None:
             try:
-                await commands.clear_queue(uuid)
-                for i in range(0, len(queue), 16):
-                    batch = queue[i:i + 16]
-                    try:
-                        await commands.soap.call(state.host, const.AV_TRANSPORT, "AddMultipleURIsToQueue", {
-                            "InstanceID": 0, "UpdateID": 0, "NumberOfURIs": len(batch),
-                            "EnqueuedURIs": " ".join(q["uri"] for q in batch),
-                            "EnqueuedURIsMetaData": " ".join(q["metadata"] for q in batch),
-                            "ContainerURI": "", "ContainerMetaData": "",
-                            "DesiredFirstTrackNumberEnqueued": 0, "EnqueueAsNext": 0}, timeout=20.0)
-                    except SoapFault:
-                        for q in batch:
-                            await commands.add_to_queue(uuid, q["uri"], q["metadata"])
+                await put_queue(commands, uuid, state.host, queue)
             except Exception as exc:                  # noqa: BLE001
                 fail(uuid, "queue", exc)
         is_queue = was["media_uri"].startswith("x-rincon-queue:")

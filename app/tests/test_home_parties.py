@@ -88,6 +88,12 @@ class _Commands:
                 self.c.lead[u] = heir
         self.c.lead[coordinator] = coordinator
 
+    async def set_source(self, zone, uri, metadata=""):
+        self.calls.append(("set_source", zone, uri))
+
+    async def play(self, zone):
+        self.calls.append(("play", zone))
+
 
 @pytest.fixture
 def rig(monkeypatch, tmp_path):
@@ -481,3 +487,189 @@ def test_end_puts_back_the_queue_the_party_found(tmp_path, monkeypatch):
     assert ("set_source", "A", "x-rincon-queue:A#0", "") in commands.calls
     seeks = [args for action, args in soap.calls if action == "Seek"]
     assert seeks and seeks[0]["Target"] == 2
+
+
+# -- last action wins: something else played on the party's speakers ----------
+
+
+def _plays(rig, zone, uri):
+    rig.controller.zones[zone].transport = SimpleNamespace(media_uri=uri)
+
+
+def test_something_else_played_lets_the_whole_party_go(rig):
+    engine = rig.engine()
+    party = run(engine.start(name="One", speakers=["A", "B"], by=ANA))
+    _plays(rig, "A", "x-rincon-queue:A#0")            # the party's own queue
+    run(engine.on_state({"type": "zone"}))
+    assert rig.notices == [] and engine.list()[0]["speakers"] == ["A", "B"]
+    rig.commands.calls.clear()
+    _plays(rig, "A", "x-sonosapi-stream:s1234")       # the Sonos app played a station
+    run(engine.on_state({"type": "zone"}))
+    assert rig.notices == [{"type": "party_notice", "party": party["id"], "zone": z, "event": "left"}
+                           for z in ("A", "B")]
+    listed = engine.list()[0]
+    assert listed["speakers"] == [] and listed["state"] == "paused"
+    assert engine.owner_of("A") is None and engine.owner_of("B") is None
+    assert rig.commands.calls == [] and rig.reverted == []   # never fights back
+    run(engine.on_state({"type": "zone"}))
+    assert len(rig.notices) == 2
+    # Ending it later owes the speakers nothing.
+    run(engine.end(party["id"]))
+    assert rig.reverted == []
+
+
+def test_a_report_from_before_the_party_played_is_not_read_as_a_change(rig):
+    engine = rig.engine()
+    _plays(rig, "A", "x-sonosapi-stream:old")         # what A played before the party
+    run(engine.start(name="One", speakers=["A"], by=ANA))
+    run(engine.on_state({"type": "zone"}))
+    assert rig.notices == [] and engine.list()[0]["speakers"] == ["A"]
+    _plays(rig, "A", "x-rincon-queue:A#0")
+    run(engine.on_state({"type": "zone"}))
+    _plays(rig, "A", "x-sonosapi-stream:new")
+    run(engine.on_state({"type": "zone"}))
+    assert [n["zone"] for n in rig.notices] == ["A"]
+
+
+def test_the_party_own_sources_are_not_outside_changes(rig):
+    rig.commands._queueable = lambda uri: not uri.startswith("x-sonosapi-stream:")
+    engine = rig.engine()
+    run(engine.start(name="TV", speakers=["A"], by=ANA, music={"kind": "tv", "source": "A"}))
+    run(engine.start(name="Line", speakers=["B"], by=ANA, music={"kind": "line_in"}))
+    run(engine.start(name="Radio", speakers=["C"], by=ANA,
+                     music={"kind": "item", "uri": "x-sonosapi-stream:s1", "title": "R"}))
+    _plays(rig, "A", "x-sonos-htastream:A:spdif")
+    _plays(rig, "B", "x-rincon-stream:B")
+    _plays(rig, "C", "x-sonosapi-stream:s1")
+    run(engine.on_state({"type": "zone"}))
+    # live sound from Sonora is the party's own too
+    _plays(rig, "A", "x-rincon-mp3radio://10.0.0.5:8000/api/home/live/k1.mp3")
+    run(engine.on_state({"type": "zone"}))
+    assert rig.notices == []
+    assert [p["speakers"] for p in engine.list()] == [["A"], ["B"], ["C"]]
+    _plays(rig, "B", "x-sonosapi-stream:s9")
+    run(engine.on_state({"type": "zone"}))
+    assert [n["zone"] for n in rig.notices] == ["B"]
+
+
+def test_a_quiet_party_owns_what_its_lead_had_loaded(rig, monkeypatch):
+    fake = scenes.apply
+
+    async def with_transport(ctrl, cmds, scene, metadata_for=None):
+        report = await fake(ctrl, cmds, scene, metadata_for)
+        for room in report["before"]["rooms"].values():
+            room["transport"] = {"media_uri": "x-sonosapi-stream:kept"}
+        return report
+    monkeypatch.setattr(scenes, "apply", with_transport)
+    engine = rig.engine()
+    run(engine.start(name="Quiet", speakers=["A"], by=ANA))
+    _plays(rig, "A", "x-sonosapi-stream:kept")
+    run(engine.on_state({"type": "zone"}))
+    assert rig.notices == []
+    # seen playing its own, so the next change of source is someone else's
+    _plays(rig, "A", "x-sonosapi-stream:other")
+    run(engine.on_state({"type": "zone"}))
+    assert [n["zone"] for n in rig.notices] == ["A"]
+
+
+def test_a_party_read_back_after_a_restart_follows_reality(rig):
+    engine = rig.engine()
+    party = run(engine.start(name="One", speakers=["A"], by=ANA))
+    _plays(rig, "A", "x-sonosapi-stream:s1")          # played while Sonora was down
+    again = rig.engine()
+    run(again.on_state({"type": "snapshot"}))
+    assert rig.notices == [{"type": "party_notice", "party": party["id"], "zone": "A", "event": "left"}]
+
+
+# -- a party with no speakers keeps its queue ---------------------------------
+
+
+def _with_queues(rig, monkeypatch, queues):
+    for zone in rig.controller.zones.values():
+        zone.host = f"h{zone.uuid}"
+    put: list[tuple] = []
+
+    async def items(commands, host):
+        return [dict(i) for i in queues.get(host[1:], [])]
+
+    async def put_queue(commands, uuid, host, queue):
+        put.append((uuid, host, [dict(q) for q in queue]))
+    monkeypatch.setattr(scenes, "_queue_items", items)
+    monkeypatch.setattr(scenes, "put_queue", put_queue)
+    return put
+
+
+def test_party_left_by_everyone_keeps_its_queue_and_puts_it_back(rig, monkeypatch):
+    queue = [{"uri": "x-file:host", "metadata": "<a/>"}, {"uri": "x-file:guest", "metadata": "<b/>"}]
+    put = _with_queues(rig, monkeypatch, {"A": queue, "C": [{"uri": "x-file:c-own", "metadata": "<c/>"}]})
+    engine = rig.engine()
+    party = run(engine.start(name="One", speakers=["A"], by=ANA))
+    engine.record_add(party["id"], "x-file:guest", GUEST)
+    _plays(rig, "A", "x-rincon-queue:A#0")
+    run(engine.on_state({"type": "zone"}))
+    _plays(rig, "A", "x-sonosapi-stream:s1")
+    run(engine.on_state({"type": "zone"}))
+    assert engine.list()[0]["speakers"] == [] and engine.list()[0]["kept_queue"] == 2
+    # kept in the file, so a restart keeps it
+    import json
+    saved = json.loads(rig.path.read_text())["parties"][0]["saved_queue"]
+    assert saved["items"] == queue and saved["added"] == {"x-file:guest": [{"id": "g_1", "name": "Guest"}]}
+    again = rig.engine()
+    rig.commands.calls.clear()
+    run(again.add_speaker(party["id"], "C", ANA))
+    assert put == [("C", "hC", queue)]
+    assert ("set_source", "C", "x-rincon-queue:C#0") in rig.commands.calls
+    assert ("play", "C") in rig.commands.calls
+    listed = again.list()[0]
+    assert listed["speakers"] == ["C"] and listed["state"] == "playing" and listed["kept_queue"] == 0
+    assert again.added_by(party["id"], "x-file:guest") == ["g_1"]
+    # C's own queue went into its way back before the party's went on it
+    run(again.end(party["id"]))
+    assert rig.reverted[-1]["rooms"]["C"]["queue"] == [{"uri": "x-file:c-own", "metadata": "<c/>"}]
+
+
+def test_party_whose_last_speaker_is_taken_keeps_its_queue(rig, monkeypatch):
+    queue = [{"uri": "x-file:1", "metadata": "<a/>"}]
+    _with_queues(rig, monkeypatch, {"A": queue})
+    engine = rig.engine()
+    one = run(engine.start(name="One", speakers=["A"], by=ANA))
+    run(engine.start(name="Two", speakers=["A"], by=ANA, take=True))
+    first = next(p for p in engine.list() if p["id"] == one["id"])
+    assert first["speakers"] == [] and first["kept_queue"] == 1
+    run(engine.start(name="Three", speakers=["B"], by=ANA))
+    run(engine.remove_speaker(engine.list()[-1]["id"], "B"))
+    assert engine.list()[-1]["kept_queue"] == 0       # B's queue was empty
+
+
+# -- the engine reads the speakers again after its own changes ----------------
+
+
+def test_a_speaker_that_left_during_a_change_is_let_go_after_it(rig, monkeypatch):
+    engine = rig.engine()
+    party = run(engine.start(name="One", speakers=["A", "B"], by=ANA))
+    fake = scenes.apply
+
+    async def meanwhile(ctrl, cmds, scene, metadata_for=None):
+        report = await fake(ctrl, cmds, scene, metadata_for)
+        ctrl.lead["B"] = "B"                          # another app took B out just now
+        await engine.on_state({"type": "snapshot"})   # heard while the engine is busy: ignored
+        return report
+    monkeypatch.setattr(scenes, "apply", meanwhile)
+    run(engine.add_speaker(party["id"], "C", ANA))
+    assert rig.notices == [{"type": "party_notice", "party": party["id"], "zone": "B", "event": "left"}]
+    assert engine.list()[0]["speakers"] == ["A", "C"]
+
+
+# -- the file ------------------------------------------------------------------
+
+
+def test_corrupt_file_is_set_aside_and_writes_are_private(rig):
+    import os
+    rig.path.write_text("{not json")
+    engine = rig.engine()
+    assert engine.list() == []
+    aside = list(rig.path.parent.glob("parties.json.corrupt-*"))
+    assert len(aside) == 1 and aside[0].read_text() == "{not json"
+    run(engine.start(name="One", speakers=["A"], by=ANA))
+    assert os.stat(rig.path).st_mode & 0o777 == 0o600
+    assert not list(rig.path.parent.glob("*.tmp"))

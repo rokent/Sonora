@@ -16,23 +16,32 @@ order they end in.
 
 Sonora never fights the household: when another app moves a party speaker
 out of the party's group, the party lets it go and says so (a
-``party_notice``); it never regroups it.
+``party_notice``); it never regroups it. The same when something else is
+played on the party's speakers: once the party's lead has been seen playing
+what the party put on (its own queue, the starting music the party chose,
+or live sound from Sonora), a lead that turns to any other source takes the
+whole party's speakers out of it.
+
+A party left with no speakers pauses and keeps its queue: the lead's queue
+and who added what are written into the party, and put back on the next
+speaker added to it.
 
 A Sonos queue has no stable item ids, so who added what is kept by track
 URI, a first-in first-out list of adders per URI, for showing names and for
 letting a guest remove only what they added.
 
 Parties, stacks and attribution live in one JSON file, rewritten after every
-change, so a restart of Sonora keeps every way back.
+change, so a restart of Sonora keeps every way back. After every change, and
+once when the engine is made, the engine reads the speakers once more, so a
+speaker that left while it was not listening is let go.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
-import json
 import logging
-import os
 import secrets
 import time
 from collections import Counter
@@ -41,11 +50,17 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Protocol
 
 from ..sonos import scenes
+from .store import load_json, write_json
 
 log = logging.getLogger(__name__)
 
-#: Controller messages after which group membership may have changed.
+#: Controller messages after which group membership or what a group plays
+#: may have changed.
 _TOPOLOGY_MESSAGES = ("snapshot", "zone")
+
+#: Live sound from Sonora (``home/live.py``) reaches a party's speakers as a
+#: stream URL under this path; the party put it there itself.
+_LIVE_PATH = "/api/home/live/"
 
 
 class Actor(Protocol):
@@ -98,6 +113,13 @@ class Party:
     state: Literal["playing", "paused"] = "playing"
     preset_id: str | None = None
     created: float = 0.0
+    #: The source the party itself put on its lead when that is not the
+    #: lead's queue: a television, a line-in, a station from the starting
+    #: music, or (for a party that started quiet) what the lead had loaded.
+    own_source: str | None = None
+    #: The queue and attribution kept while the party has no speakers:
+    #: ``{"items": [{uri, metadata}], "added": {uri: [adders]}}``.
+    saved_queue: dict | None = None
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Party":
@@ -106,14 +128,17 @@ class Party:
                    speakers=[str(s) for s in raw.get("speakers") or []],
                    volumes={str(k): int(v) for k, v in (raw.get("volumes") or {}).items()},
                    state="paused" if raw.get("state") == "paused" else "playing",
-                   preset_id=raw.get("preset_id"), created=float(raw.get("created") or 0.0))
+                   preset_id=raw.get("preset_id"), created=float(raw.get("created") or 0.0),
+                   own_source=str(raw["own_source"]) if raw.get("own_source") else None,
+                   saved_queue=raw["saved_queue"] if isinstance(raw.get("saved_queue"), dict) else None)
 
 
-def _write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1))
-    os.replace(tmp, path)
+def _public(party: Party) -> dict:
+    """A party as it is shown: the kept queue is counted, not listed."""
+    out = asdict(party)
+    kept = out.pop("saved_queue", None)
+    out["kept_queue"] = len((kept or {}).get("items") or [])
+    return out
 
 
 def _split(before: dict | None, speakers: list[str]) -> dict[str, dict | None]:
@@ -163,15 +188,19 @@ class PartyEngine:
         #: topology events Sonora's own regrouping brings are not read as
         #: another app's doing.
         self._lock = asyncio.Lock()
+        #: Parties whose lead has been seen playing what the party put on.
+        #: Only those are let go when it turns to something else, so a
+        #: report still on its way from before the party's own change is not
+        #: read as someone else's. Parties read back from the file are taken
+        #: as seen: nothing of the engine's is on its way then.
+        self._seen: set[str] = set()
         self._load()
+        self._seen = set(self._parties)
 
     # -- persistence -----------------------------------------------------------
 
     def _load(self) -> None:
-        try:
-            data = json.loads(self._path.read_text())
-        except (OSError, ValueError):
-            return
+        data = load_json(self._path)
         if not isinstance(data, dict):
             return
         for raw in data.get("parties") or []:
@@ -191,7 +220,7 @@ class PartyEngine:
                            for p, uris in added.items() if isinstance(uris, dict) and p in self._parties}
 
     def _save(self) -> None:
-        _write_json(self._path, {"parties": [asdict(p) for p in self._parties.values()],
+        write_json(self._path, {"parties": [asdict(p) for p in self._parties.values()],
                                  "stacks": self._stacks, "added": self._added})
 
     # -- reading ---------------------------------------------------------------
@@ -199,7 +228,7 @@ class PartyEngine:
     def list(self) -> list[dict]:
         """Every party, oldest first, each with ``queue_owners``: who added
         each track URI still attributed, oldest adder first."""
-        return [{**asdict(p), "queue_owners": {u: [dict(w) for w in who]
+        return [{**_public(p), "queue_owners": {u: [dict(w) for w in who]
                                                for u, who in self._added.get(p.id, {}).items() if who}}
                 for p in sorted(self._parties.values(), key=lambda p: p.created)]
 
@@ -312,6 +341,72 @@ class PartyEngine:
         except Exception as exc:                      # noqa: BLE001 - the party starts all the same
             log.info("party: the queue of %s could not be read: %s", lead, exc)
 
+    def _host(self, zone: str) -> str | None:
+        try:
+            return self._controller.zone(zone).host
+        except (KeyError, AttributeError):
+            return None
+
+    async def _read_queue(self, zone: str) -> list[dict] | None:
+        host = self._host(zone)
+        if host is None:
+            return None
+        try:
+            return await scenes._queue_items(self._commands, host)
+        except Exception as exc:                      # noqa: BLE001 - the party pauses all the same
+            log.info("party: the queue of %s could not be read: %s", zone, exc)
+            return None
+
+    def _keep(self, party: Party, items: list[dict] | None) -> None:
+        """Write the queue a party with no speakers keeps, and who added
+        what, into the party."""
+        if items is None:
+            return
+        party.saved_queue = {"items": items, "added": copy.deepcopy(self._added.get(party.id, {}))}
+
+    async def _put_back(self, party: Party, zone: str, record: dict | None) -> None:
+        """``zone`` now leads a party that had no speakers: put the queue the
+        party kept on it, so the guests' songs come back. With no queue
+        kept, the party takes what ``zone`` has loaded as its own."""
+        kept = party.saved_queue or {}
+        items = kept.get("items") or []
+        party.saved_queue = None
+        self._seen.discard(party.id)
+        if not items:
+            room = ((record or {}).get("rooms") or {}).get(zone) or {}
+            party.own_source = (room.get("transport") or {}).get("media_uri") or None
+            return
+        party.own_source = None
+        added = kept.get("added")
+        if isinstance(added, dict):
+            self._added[party.id] = {u: list(w) for u, w in added.items() if isinstance(w, list) and w}
+        host = self._host(zone)
+        try:
+            if host is None:
+                raise KeyError(zone)
+            await scenes.put_queue(self._commands, zone, host, items)
+            await self._commands.set_source(zone, f"x-rincon-queue:{zone}#0", "")
+            await self._commands.play(zone)
+        except Exception as exc:                      # noqa: BLE001 - the speaker joins all the same
+            log.info("party %r: its queue could not be put back on %s: %s", party.name, zone, exc)
+
+    def _own_source(self, music: dict | None, lead: str, record: dict | None) -> str | None:
+        """The source the party puts on ``lead`` when it is not the queue."""
+        kind = (music or {}).get("kind")
+        if kind == "tv":
+            return f"x-sonos-htastream:{lead}:spdif"
+        if kind == "line_in":
+            return f"x-rincon-stream:{music.get('source') or lead}"
+        if kind == "item":
+            uri = music.get("uri") or ""
+            queueable = getattr(self._commands, "_queueable", None)
+            if music.get("item_kind") == "audiobook" or (queueable is not None and not queueable(uri)):
+                return uri or None
+            return None
+        # Quiet: the lead keeps what it had loaded.
+        room = ((record or {}).get("rooms") or {}).get(lead) or {}
+        return (room.get("transport") or {}).get("media_uri") or None
+
     async def _hand_over(self, party: Party, zone: str) -> None:
         """Before ``zone`` leaves ``party``, give the group's lead to the next
         speaker if ``zone`` leads it, so the rest carry on together instead
@@ -323,11 +418,14 @@ class PartyEngine:
                 await self._settle({**{u: heir for u in party.speakers if u != zone}, zone: zone})
             except Exception as exc:                  # noqa: BLE001 - the speaker moves all the same
                 log.info("party %r: handing the lead to %s failed: %s", party.name, heir, exc)
+        if party.speakers == [zone]:
+            self._keep(party, await self._read_queue(zone))
         if zone in party.speakers:
             party.speakers.remove(zone)
             party.volumes.pop(zone, None)
         if not party.speakers:
             party.state = "paused"
+            self._seen.discard(party.id)
 
     async def _release(self, plans: dict[str, tuple[str, Any]]) -> dict:
         """Carry out where each leaving speaker goes: rejoin its party's lead,
@@ -357,9 +455,42 @@ class PartyEngine:
 
     # -- parties ---------------------------------------------------------------
 
-    async def start(self, *, name: str, speakers: list[str], by: Actor,
-                    volumes: dict[str, int] | None = None, music: dict | None = None,
-                    preset_id: str | None = None, take: bool = False) -> dict:
+    async def _catch_up(self) -> None:
+        """Read the speakers once more, as after a topology change: a speaker
+        that left while the engine held its lock (or before it was made) is
+        let go now rather than at the next change someone else makes."""
+        try:
+            await self.on_state({"type": "snapshot"})
+        except Exception:                             # noqa: BLE001 - never fails the change itself
+            log.exception("parties: the catch-up read failed")
+
+    async def start(self, **kwargs) -> dict:
+        try:
+            return await self._start(**kwargs)
+        finally:
+            await self._catch_up()
+
+    async def end(self, party_id: str) -> dict:
+        try:
+            return await self._end(party_id)
+        finally:
+            await self._catch_up()
+
+    async def add_speaker(self, party_id: str, zone: str, by: Actor, take: bool = False) -> dict:
+        try:
+            return await self._add_speaker(party_id, zone, by, take)
+        finally:
+            await self._catch_up()
+
+    async def remove_speaker(self, party_id: str, zone: str) -> dict:
+        try:
+            return await self._remove_speaker(party_id, zone)
+        finally:
+            await self._catch_up()
+
+    async def _start(self, *, name: str, speakers: list[str], by: Actor,
+                     volumes: dict[str, int] | None = None, music: dict | None = None,
+                     preset_id: str | None = None, take: bool = False) -> dict:
         """Start a party on ``speakers`` (the first leads) and return it.
 
         Raises ``SpeakerTaken`` for a speaker another party holds unless
@@ -400,7 +531,8 @@ class PartyEngine:
             await self._keep_queue(records[held[0]], held[0])
             party = Party(id="pt_" + secrets.token_hex(6), name=scene["name"], owner=by.id, owner_name=by.name,
                           household=household, speakers=held, volumes={z: v for z, v in volumes.items() if z in held},
-                          state="playing", preset_id=preset_id, created=time.time())
+                          state="playing", preset_id=preset_id, created=time.time(),
+                          own_source=self._own_source(scene["groups"][0]["play"], held[0], records[held[0]]))
             self._parties[party.id] = party
             for zone in held:
                 self._push(zone, party.id, records[zone])
@@ -408,7 +540,7 @@ class PartyEngine:
                 if zone not in held:
                     self._stacks.pop(zone, None)
             self._save()
-        return {**asdict(party), "report": {k: report.get(k) for k in ("set", "missing", "failed")}}
+        return {**_public(party), "report": {k: report.get(k) for k in ("set", "missing", "failed")}}
 
     def on_end(self, callback: Callable[[str], Awaitable[None] | None]) -> None:
         """Call ``callback(party_id)`` whenever a party ends. Any number of
@@ -433,7 +565,7 @@ class PartyEngine:
             except Exception:
                 log.exception("parties: an on_end listener failed for %s", party_id)
 
-    async def end(self, party_id: str) -> dict:
+    async def _end(self, party_id: str) -> dict:
         """End the party: each speaker rejoins the party it was taken from if
         that one is still going, else goes back to how it was before any
         party. The party and its attribution are forgotten."""
@@ -444,16 +576,18 @@ class PartyEngine:
                 self._drop_entries(zone, party_id)
             del self._parties[party_id]
             self._added.pop(party_id, None)
+            self._seen.discard(party_id)
             self._save()
             await self._fire_end(party_id)
             report = await self._release(plans)
             self._save()
         return {"id": party_id, "name": party.name, **report}
 
-    async def add_speaker(self, party_id: str, zone: str, by: Actor, take: bool = False) -> dict:
+    async def _add_speaker(self, party_id: str, zone: str, by: Actor, take: bool = False) -> dict:
         """Add ``zone`` to the party: its state is written down, it steps out
         of whatever group it is in, then joins the party's lead (or leads
-        the party, when the party has no speakers left). Raises
+        the party, when the party has no speakers left, and gets the queue
+        the party kept). Raises
         ``NoSpeakers`` for a speaker that cannot be reached."""
         async with self._lock:
             party = self._party(party_id)
@@ -484,13 +618,14 @@ class PartyEngine:
                     log.info("party %r: %s could not join: %s", party.name, zone, exc)
             else:
                 await self._keep_queue(record, zone)
+                await self._put_back(party, zone, record)
             party.speakers.append(zone)
             party.state = "playing"
             self._push(zone, party_id, record)
             self._save()
             return self.get(party_id)
 
-    async def remove_speaker(self, party_id: str, zone: str) -> dict:
+    async def _remove_speaker(self, party_id: str, zone: str) -> dict:
         """Take ``zone`` out of the party, back to the party it came from if
         that one is still going, else to before any party."""
         async with self._lock:
@@ -544,6 +679,27 @@ class PartyEngine:
         except KeyError:
             return None
 
+    def _media_of(self, zone: str) -> str | None:
+        """What ``zone``'s group has loaded, None when it cannot be told."""
+        try:
+            transport = getattr(self._controller.coordinator_of(zone), "transport", None)
+        except KeyError:
+            return None
+        uri = getattr(transport, "media_uri", None)
+        return uri if isinstance(uri, str) else None
+
+    def _plays_its_own(self, party: Party, uri: str) -> bool:
+        """Whether the party's lead plays something the party put there."""
+        if not uri or uri.startswith("x-rincon:"):
+            # Nothing loaded yet, or following another room (the topology
+            # check answers for that).
+            return True
+        if uri == f"x-rincon-queue:{party.speakers[0]}#0":
+            return True
+        if party.own_source and uri == party.own_source:
+            return True
+        return _LIVE_PATH in uri
+
     async def on_state(self, message: dict) -> None:
         """After a topology change, let go of every party speaker that is no
         longer in the party's group, and say so. Never regroups.
@@ -551,7 +707,11 @@ class PartyEngine:
         The party's group is the one holding most of its speakers (on a tie,
         the one its lead is in), so a lead moved away by another app is the
         one let go, and the party's lead becomes that group's. Nothing is
-        read while the engine itself is regrouping."""
+        read while the engine itself is regrouping.
+
+        Then, last action wins: a party whose lead has been seen playing what
+        the party put on and now plays something else lets all its speakers
+        go, says so for each, pauses and keeps its queue."""
         if message.get("type") not in _TOPOLOGY_MESSAGES or self._lock.locked():
             return
         notices = []
@@ -581,7 +741,37 @@ class PartyEngine:
                 changed = True
             if not party.speakers:
                 party.state = "paused"
+        keeping: list[tuple[Party, str]] = []
+        for party in list(self._parties.values()):
+            if not party.speakers:
+                continue
+            uri = self._media_of(party.speakers[0])
+            if uri is None:
+                continue
+            if self._plays_its_own(party, uri):
+                self._seen.add(party.id)
+                continue
+            if party.id not in self._seen:
+                continue
+            # Something else was put on the party's speakers: they leave it.
+            lead = party.speakers[0]
+            for zone in party.speakers:
+                self._stacks.pop(zone, None)
+                notices.append({"type": "party_notice", "party": party.id, "zone": zone, "event": "left"})
+            party.speakers = []
+            party.volumes = {}
+            party.state = "paused"
+            self._seen.discard(party.id)
+            keeping.append((party, lead))
+            changed = True
         if notices or changed:
+            self._save()
+        if keeping:
+            for party, lead in keeping:
+                items = await self._read_queue(lead)
+                # Unless a speaker was added to it meanwhile.
+                if not party.speakers and party.id in self._parties:
+                    self._keep(party, items)
             self._save()
         for notice in notices:
             await self._notify(notice)
