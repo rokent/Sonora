@@ -68,7 +68,7 @@ CLOSE_UNKNOWN_PARTY = 4004
 CLOSE_TOO_SLOW = 4008              # a send did not complete in SEND_TIMEOUT
 SEND_TIMEOUT = 5.0
 
-_MEDIA_PATH = re.compile(r"/api/home/media/([A-Za-z0-9_-]{16,64})\.m4a")
+_MEDIA_PATH = re.compile(r"/api/home/media/([A-Za-z0-9_-]{16,64})\.(?:m4a|aac)")
 
 
 @dataclass(frozen=True)
@@ -202,6 +202,7 @@ async def default_resolve(uri: str) -> tuple[str, dict[str, str]] | None:
     if not main.fetchguard.safe_to_fetch(src.url):
         main.fetchguard.refuse(src.url, "visual analysis")
         return None
+    await youtube.until_available(src)
     return src.url, dict(src.headers)
 
 

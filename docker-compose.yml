@@ -18,9 +18,15 @@ services:
       # Set to 1 when Sonora sits behind a reverse proxy you trust.
       # SONORA_TRUST_PROXY: 1
       # Optional shared browser (see docs/remote-browser.md): full control for
-      # household members, watch-only for guests.
+      # household members, watch-only for guests. Watch-only is enforced by
+      # neko's user profile below (can_host: false), not by Sonora. If Sonora
+      # is on HTTPS, neko must be too (an http:// frame is blocked as mixed
+      # content): put it behind the same proxy.
       # SONORA_NEKO_URL: http://sonora.local:8080/?usr=host&pwd=change-me-admin
       # SONORA_NEKO_VIEW_URL: http://sonora.local:8080/?usr=guest&pwd=change-me-user
+      # If a speaker will not play YouTube items, set aac (needs ffmpeg, which
+      # the image has; no seeking). See docs/youtube.md.
+      # SONORA_YOUTUBE_FORMAT: m4a
     volumes:
       - ./sonora-data:/data
 
@@ -37,6 +43,12 @@ services:
   #     NEKO_MEMBER_PROVIDER: multiuser
   #     NEKO_MEMBER_MULTIUSER_USER_PASSWORD: change-me-user
   #     NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD: change-me-admin
+  #     # The user (guest/view) login may watch but never take control:
+  #     NEKO_MEMBER_MULTIUSER_USER_PROFILE: >-
+  #       {"name":"","is_admin":false,"can_login":true,"can_connect":true,
+  #       "can_watch":true,"can_host":false,"can_share_media":false,
+  #       "can_access_clipboard":false,"sends_inactive_cursor":false,
+  #       "can_see_inactive_cursors":false}
   #     NEKO_WEBRTC_EPR: 52000-52100
   #     NEKO_WEBRTC_ICELITE: 1
   #   volumes:
