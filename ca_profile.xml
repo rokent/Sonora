@@ -2,10 +2,10 @@
   <Profile>
 [Sonora](https://sonoracontroller.com/) is a self-hosted web controller for Sonos S1 and S2 systems.
 
-For help, or to report a bug, open an issue at https://github.com/Bretteroo/Sonora/issues
+For help, or to report a bug, open an issue at https://github.com/rokent/Sonora/issues
   </Profile>
-  <Icon>https://raw.githubusercontent.com/Bretteroo/Sonora/main/app/frontend/src/assets/sonora.png</Icon>
-  <WebPage>https://github.com/Bretteroo/Sonora</WebPage>
+  <Icon>https://raw.githubusercontent.com/rokent/Sonora/main/app/frontend/src/assets/sonora.png</Icon>
+  <WebPage>https://github.com/rokent/Sonora</WebPage>
   <DonateLink>https://ko-fi.com/bretteroo</DonateLink>
   <DonateText>Support Sonora</DonateText>
 </CommunityApplications>

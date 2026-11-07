@@ -136,7 +136,7 @@ You'll need Home Assistant OS or a Supervised install. Container and Core instal
 
 ### Install Sonora
 * In Home Assistant, go to **Settings > Apps** and choose **Install App**.
-* Open the **⋮** menu at the top right, choose **Repositories**, and add `https://github.com/Bretteroo/Sonora`.
+* Open the **⋮** menu at the top right, choose **Repositories**, and add `https://github.com/rokent/Sonora`.
 * Find **Sonora** in the store, then install and start it.
 * Turn on **Show in sidebar**.
 
@@ -175,7 +175,7 @@ You'll need:
 ```
 sudo mkdir /opt/sonora
 sudo chown $USER: /opt/sonora
-git clone https://github.com/Bretteroo/Sonora.git /opt/sonora
+git clone https://github.com/rokent/Sonora.git /opt/sonora
 cd /opt/sonora/app/frontend
 npm ci
 npm run build
@@ -532,7 +532,7 @@ Scenes are a powerful way to control your Sonos devices.  They can be confusing,
 
 ## 💙 Contributions
 
-Issue reports are welcome. If you find a bug, <a href="https://github.com/Bretteroo/Sonora/issues/new?template=bug_report.yml">open an issue</a> and say which theme you were using, which system (S1 or S2), which music service, what you did, and what you saw.  Screenshots help!
+Issue reports are welcome. If you find a bug, <a href="https://github.com/rokent/Sonora/issues/new?template=bug_report.yml">open an issue</a> and say which theme you were using, which system (S1 or S2), which music service, what you did, and what you saw.  Screenshots help!
 
 My goal for Sonora is for it to feel every bit as polished as an official Sonos product.
 

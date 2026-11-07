@@ -29,7 +29,7 @@ import aiohttp
 
 log = logging.getLogger(__name__)
 
-REPOSITORY = "Bretteroo/Sonora"
+REPOSITORY = "rokent/Sonora"
 LATEST_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 #: Where About sends people: every release's notes, newest first.
 RELEASES_PAGE = f"https://github.com/{REPOSITORY}/releases"

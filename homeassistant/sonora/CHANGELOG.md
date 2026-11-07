@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.0
+
+### Sonora Home (fork of Sonora 1.2.0)
+
+* Sign-in with Authentik, plus a shared guest link (QR code) with limited rights.
+* Parties: a shared queue on chosen speakers, "added by" on every song, presets you start in two taps (or from Home Assistant).
+* YouTube in party queues, played by the server straight to the speakers, with a video window.
+* TV mode (video, MilkDrop visualizer, cover and lyrics), display links for screens, and Samsung TV control.
+* Sound from PCs and phones: AirPlay names for parties and rooms, the Windows Scream sound card, file drop and a browser tab's sound.
+* Home Assistant API with tokens: start presets, end parties, show a party on a TV.
+
 ## 1.2.0
 
 ### Added support for Scenes

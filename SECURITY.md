@@ -39,6 +39,6 @@ The Network check reads four status pages from each speaker (its radio, its netw
 ## Reporting a vulnerability
 
 Use GitHub's private reporting: open the repository's **Security** tab and choose **Report a vulnerability**, or go straight to
-<https://github.com/Bretteroo/Sonora/security/advisories/new>. Your report will be hidden from public view.
+<https://github.com/rokent/Sonora/security/advisories/new>. Your report will be hidden from public view.
 
 I want Sonora to be a safe and trusted part of your homelab.  Thanks for reporting!

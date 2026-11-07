@@ -7,7 +7,7 @@ on your Home Assistant machine and puts it in the sidebar.
 
 1. In Home Assistant, go to **Settings > Apps** and choose **Install App**.
 2. Open the menu at the top right, choose **Repositories**, and add
-   `https://github.com/Bretteroo/Sonora`.
+   `https://github.com/rokent/Sonora`.
 3. Find **Sonora** in the store, install it, and start it.
 4. Turn on **Show in sidebar**, or use **Open Web UI**.
 
@@ -55,7 +55,7 @@ upload, in the app's data folder. Home Assistant backups include it.
 
 ## Support
 
-Please report any issues you find with Sonora on [GitHub](https://github.com/Bretteroo/Sonora/issues).
+Please report any issues you find with Sonora on [GitHub](https://github.com/rokent/Sonora/issues).
 
 Sonora is free. If it's useful to you, you can
 [support the project on Ko-fi](https://ko-fi.com/bretteroo).

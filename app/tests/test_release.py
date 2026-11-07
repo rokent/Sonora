@@ -126,13 +126,13 @@ def github(monkeypatch, status, data):
 
 def test_a_newer_release_is_reported(monkeypatch):
     asked = github(monkeypatch, 200, {"tag_name": "v1.0.10",
-                                      "html_url": "https://github.com/Bretteroo/Sonora/releases/tag/v1.0.10"})
+                                      "html_url": "https://github.com/rokent/Sonora/releases/tag/v1.0.10"})
     asyncio.run(release.check_once())
     status = release.status()
     assert asked == [release.LATEST_URL]
     # The link is to the release notes as a whole, not the one version's.
     assert (status["available"], status["latest"], status["url"]) == (
-        True, "1.0.10", "https://github.com/Bretteroo/Sonora/releases")
+        True, "1.0.10", "https://github.com/rokent/Sonora/releases")
 
 
 def test_the_same_version_is_not_news(monkeypatch):

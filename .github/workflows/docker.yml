@@ -1,5 +1,5 @@
 # The Docker image, for x64 and arm64, published to GitHub's container
-# registry as ghcr.io/bretteroo/sonora.
+# registry as ghcr.io/rokent/sonora.
 #
 #   tag v1.2.3       -> :1.2.3, :1.2 and :latest
 #   pull request     -> built for both platforms, not published
@@ -46,7 +46,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/bretteroo/sonora
+          images: ghcr.io/rokent/sonora
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

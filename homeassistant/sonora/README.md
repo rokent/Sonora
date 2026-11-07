@@ -8,6 +8,6 @@ Sonora has a full theming engine with several themes included, among them are cl
 
 Sonora is not affiliated with or endorsed by Sonos, Inc.
 
-Learn more about Sonora [on GitHub](https://github.com/Bretteroo/Sonora)
+Learn more about Sonora [on GitHub](https://github.com/rokent/Sonora)
 
-<img src="https://raw.githubusercontent.com/Bretteroo/Sonora/main/docs/screenshots/liquidglass/spread.webp" alt="Liquid Glass theme: Home, Now Playing and a music service">
+<img src="https://raw.githubusercontent.com/rokent/Sonora/main/docs/screenshots/liquidglass/spread.webp" alt="Liquid Glass theme: Home, Now Playing and a music service">

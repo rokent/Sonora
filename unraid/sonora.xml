@@ -1,26 +1,26 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>Sonora</Name>
-  <Repository>ghcr.io/bretteroo/sonora:latest</Repository>
-  <Registry>https://github.com/Bretteroo/Sonora/pkgs/container/sonora</Registry>
+  <Repository>ghcr.io/rokent/sonora:latest</Repository>
+  <Registry>https://github.com/rokent/Sonora/pkgs/container/sonora</Registry>
   <Network>host</Network>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
   <ExtraParams>--init</ExtraParams>
-  <Icon>https://raw.githubusercontent.com/Bretteroo/Sonora/main/app/frontend/src/assets/sonora.png</Icon>
+  <Icon>https://raw.githubusercontent.com/rokent/Sonora/main/app/frontend/src/assets/sonora.png</Icon>
   <WebUI>http://[IP]:[PORT:50205]/</WebUI>
   <Overview>Sonora is a self-hosted web controller for Sonos S1 and S2 systems. Control every Sonos speaker from any browser on any device, Linux included, with nothing to install on the devices themselves. Grouping, volume, EQ, sleep timers, alarms, music services, local libraries, Sonos Favorites and playlists are all there, along with lyrics, a "This browser" room that plays through the page itself, an S2 upgrade advisor, diagnostics, a choice of themes and twenty languages. It talks to your speakers on your own network; signing in to Sonos is optional. Sonora is not affiliated with Sonos, Inc.</Overview>
-  <Support>https://github.com/Bretteroo/Sonora/issues</Support>
+  <Support>https://github.com/rokent/Sonora/issues</Support>
   <Project>https://sonoracontroller.com/</Project>
-  <ReadMe>https://raw.githubusercontent.com/Bretteroo/Sonora/main/README.md</ReadMe>
-  <TemplateURL>https://raw.githubusercontent.com/Bretteroo/Sonora/main/unraid/sonora.xml</TemplateURL>
+  <ReadMe>https://raw.githubusercontent.com/rokent/Sonora/main/README.md</ReadMe>
+  <TemplateURL>https://raw.githubusercontent.com/rokent/Sonora/main/unraid/sonora.xml</TemplateURL>
   <Category>MediaApp:Music HomeAutomation:</Category>
   <ExtraSearchTerms>sonos speaker controller s1 s2 music remote</ExtraSearchTerms>
   <Requires>Host networking (set by this template). Sonora finds the speakers by multicast, and the speakers connect back to it on the event port, so it must be on the same network as the speakers. It uses ports 50205 and 50206 on the server; if either is taken, set others in the template's Web port and Event port settings. The AirPlay receivers use ports 5100-5199 (TCP and UDP) and mDNS, the Windows sound receiver UDP 4010; both can be turned off below. Extra Parameters keeps --init, a small init that reaps the helper processes Sonora starts.</Requires>
   <License>AGPL-3.0-only</License>
-  <Screenshot>https://raw.githubusercontent.com/Bretteroo/Sonora/main/docs/screenshots/coromar/home.webp</Screenshot>
-  <Screenshot>https://raw.githubusercontent.com/Bretteroo/Sonora/main/docs/screenshots/liquidglass/home.webp</Screenshot>
-  <Screenshot>https://raw.githubusercontent.com/Bretteroo/Sonora/main/docs/screenshots/coromar/mobile-player.webp</Screenshot>
+  <Screenshot>https://raw.githubusercontent.com/rokent/Sonora/main/docs/screenshots/coromar/home.webp</Screenshot>
+  <Screenshot>https://raw.githubusercontent.com/rokent/Sonora/main/docs/screenshots/liquidglass/home.webp</Screenshot>
+  <Screenshot>https://raw.githubusercontent.com/rokent/Sonora/main/docs/screenshots/coromar/mobile-player.webp</Screenshot>
   <Config Name="Data" Target="/data" Default="/mnt/user/appdata/sonora" Mode="rw" Description="Sign-ins, installed themes and caches." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/sonora</Config>
   <Config Name="Web port" Target="SONORA_WEB_PORT" Default="50205" Mode="" Description="The port the page is served on. With host networking there is no port mapping, so change the port here. If you change it, edit the WebUI link under Advanced View to match." Type="Variable" Display="always" Required="true" Mask="false">50205</Config>
   <Config Name="Event port" Target="SONORA_EVENT_PORT" Default="50206" Mode="" Description="The port the speakers connect to with live updates. 0 picks any free port." Type="Variable" Display="advanced" Required="false" Mask="false">50206</Config>

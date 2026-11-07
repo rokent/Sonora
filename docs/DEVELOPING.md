@@ -177,7 +177,7 @@ The published image, for x64 and arm64:
     docker compose up -d
 
 `.github/workflows/docker.yml` builds it on GitHub for both platforms and
-pushes it to `ghcr.io/bretteroo/sonora` only for a release: `:1.2.3`, `:1.2`
+pushes it to `ghcr.io/rokent/sonora` only for a release: `:1.2.3`, `:1.2`
 and `:latest` from a `v1.2.3` tag. Pushes to main publish nothing, and
 `docker-compose.yml` pulls `:latest`. To make a release, tag main and push the
 tag:
@@ -187,7 +187,7 @@ tag:
 A pull request builds both platforms without publishing. To run a copy built from this checkout
 instead, tag it with the same name and compose uses it:
 
-    docker build -t ghcr.io/bretteroo/sonora:latest . && docker compose up -d
+    docker build -t ghcr.io/rokent/sonora:latest . && docker compose up -d
 
 Same address, same port. The compose file runs with `network_mode: host`,
 which is a requirement rather than a convenience: Sonora finds speakers by

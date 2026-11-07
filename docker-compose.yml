@@ -1,6 +1,6 @@
 services:
   sonora:
-    image: ghcr.io/bretteroo/sonora:latest
+    image: ghcr.io/rokent/sonora:latest
     container_name: sonora
     restart: unless-stopped
     network_mode: host
