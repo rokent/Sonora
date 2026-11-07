@@ -47,7 +47,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 log = logging.getLogger(__name__)
 
-__all__ = ["Analyzer", "Playing", "visuals_mode", "analyzer", "register_source", "router"]
+__all__ = ["Analyzer", "Playing", "visuals_mode", "analyzer", "register_source",
+           "unregister_source", "router"]
 
 router = APIRouter()
 
@@ -64,6 +65,8 @@ BACKOFF_MIN, BACKOFF_MAX = 2.0, 60.0
 #: Close codes ``/ws/visual`` uses after accepting, so the page can tell why.
 CLOSE_DISABLED = 4001              # no ffmpeg: visuals are approximate
 CLOSE_UNKNOWN_PARTY = 4004
+CLOSE_TOO_SLOW = 4008              # a send did not complete in SEND_TIMEOUT
+SEND_TIMEOUT = 5.0
 
 _MEDIA_PATH = re.compile(r"/api/home/media/([A-Za-z0-9_-]{16,64})\.m4a")
 
@@ -90,6 +93,9 @@ def ffmpeg_path() -> str | None:
     return shutil.which("ffmpeg")
 
 
+# TODO(phase 4): make the mode per party. A registered live source needs no
+# ffmpeg, yet without ffmpeg the whole analyzer is off (analyzer() is None)
+# and such a party is reported "approximate" too.
 def visuals_mode() -> Literal["exact", "approximate"]:
     """``exact`` when ffmpeg is on PATH (server frames), else ``approximate``
     (microphone or a generic animation in the page)."""
@@ -106,10 +112,20 @@ def media_key(uri: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _safe_header(key: str, value: str) -> bool:
+    """A header ffmpeg may send: no CR/LF anywhere (it would inject further
+    headers into the request) and no ':' in the name."""
+    key, value = str(key), str(value)
+    return bool(key) and not any(c in key for c in "\r\n:") and not any(c in value for c in "\r\n")
+
+
 def ffmpeg_args(ffmpeg: str, url: str, headers: dict[str, str], position: float) -> list[str]:
     args = [ffmpeg, "-nostdin", "-loglevel", "error"]
-    if headers:
-        args += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
+    safe = {k: v for k, v in (headers or {}).items() if _safe_header(k, v)}
+    if safe:
+        args += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in safe.items())]
+    # only network reads: a crafted URL cannot make ffmpeg open a local file
+    args += ["-protocol_whitelist", "https,tls,tcp,http"]
     return args + ["-ss", f"{max(0.0, position):.3f}", "-re", "-i", url,
                    "-f", "u8", "-ac", "1", "-ar", str(RATE), "pipe:1"]
 
@@ -213,7 +229,7 @@ class Subscription:
 
 @dataclass(eq=False)
 class _Run:
-    """One decode: an ffmpeg process for a track, or a registered PCM source."""
+    """One decode: an ffmpeg process reading a track."""
 
     uri: str
     start: float
@@ -239,8 +255,8 @@ class _Party:
     lead: dict = field(default_factory=dict)         # uri -> measured latency
     retry_at: dict = field(default_factory=dict)     # uri -> clock
     backoff: dict = field(default_factory=dict)      # uri -> seconds
-    source: AsyncIterator[bytes] | None = None
-    source_live: bool = False
+    #: Whether the party shows its registered live source (not its track).
+    on_source: bool = False
 
 
 class Analyzer:
@@ -257,6 +273,7 @@ class Analyzer:
         self._idle_stop, self._drift = idle_stop, drift
         self._parties: dict[str, _Party] = {}
         self._sources: dict[str, AsyncIterator[bytes]] = {}
+        self._readers: dict[str, asyncio.Task] = {}
         self.loop = asyncio.get_running_loop()
 
     @property
@@ -291,13 +308,27 @@ class Analyzer:
 
     def register_source(self, party_id: str, pcm: AsyncIterator[bytes]) -> Callable[[], None]:
         """Analyse a live stream (s16le mono 22050 Hz chunks) for a party
-        instead of its track. Returns the call that unregisters it."""
+        instead of its track. Returns the call that unregisters it.
+
+        The stream is read from now until it ends, raises, or is unregistered,
+        viewers or not (a producer is never left blocked); frames are only
+        made while someone watches. Viewers coming and going, and the party's
+        idle stop, never end it."""
+        self.unregister_source(party_id)
         self._sources[party_id] = pcm
+        self._readers[party_id] = asyncio.create_task(self._read_pcm(party_id, pcm))
 
         def unregister() -> None:
             if self._sources.get(party_id) is pcm:
-                del self._sources[party_id]
+                self.unregister_source(party_id)
         return unregister
+
+    def unregister_source(self, party_id: str) -> None:
+        """Stop reading the party's live source; it goes back to its track."""
+        self._sources.pop(party_id, None)
+        reader = self._readers.pop(party_id, None)
+        if reader is not None and reader is not asyncio.current_task():
+            reader.cancel()
 
     # -- the per-party loop --
 
@@ -319,13 +350,12 @@ class Analyzer:
         if not party.subs and now - party.idle_since >= self._idle_stop:
             del self._parties[party.id]     # a new viewer from here on starts afresh
             return False
-        source = self._sources.get(party.id)
-        if source is not None:
-            if party.run is None or party.source is not source:
-                await self._stop(party)
-                self._start_source(party, source)
+        if party.id in self._sources:
+            if not party.on_source:
+                await self._stop(party)     # the track's ffmpeg gives way
+                party.on_source = True
             return True
-        if party.source is not None:        # the live source went away
+        if party.on_source:                 # the live source went away
             await self._stop(party)
         want = self._probe(party.id)
         if inspect.isawaitable(want):
@@ -335,12 +365,12 @@ class Analyzer:
             return True
         run = party.run
         if run is not None and run.uri == want.uri:
-            if run.samples and abs(want.position - run.position()) > self._drift:
-                await self._stop(party)     # a seek: start again where the speaker is
-            elif run.done and not run.samples:
-                await self._stop(party)     # died without a frame: back off
+            if run.done:
+                await self._stop(party)     # ffmpeg ended or died: back off first
                 self._fail(party, want.uri, now)
                 return True
+            if run.samples and abs(want.position - run.position()) > self._drift:
+                await self._stop(party)     # a seek: start again where the speaker is
             else:
                 return True
         elif run is not None:
@@ -374,11 +404,6 @@ class Analyzer:
         party.run = run
         run.task = asyncio.create_task(self._read(party, run))
 
-    def _start_source(self, party: _Party, source: AsyncIterator[bytes]) -> None:
-        run = _Run("", 0.0, party.gen, self._clock())
-        party.run, party.source = run, source
-        run.task = asyncio.create_task(self._read_pcm(party, run, source))
-
     async def _read(self, party: _Party, run: _Run) -> None:
         try:
             while True:
@@ -390,30 +415,44 @@ class Analyzer:
         finally:
             run.done = True
 
-    async def _read_pcm(self, party: _Party, run: _Run, source: AsyncIterator[bytes]) -> None:
+    async def _read_pcm(self, party_id: str, source: AsyncIterator[bytes]) -> None:
+        """Drain a live source for as long as it is registered. ``t`` counts
+        stream seconds from registration, viewers or not."""
         buf = bytearray()
         need = HOP_SAMPLES * 2
+        consumed = 0                         # bytes of the stream behind ``buf``
         try:
             async for chunk in source:
                 buf += chunk
+                party = self._parties.get(party_id)
+                if party is None or not party.subs or not party.on_source:
+                    drop = len(buf) - len(buf) % 2   # keep sample alignment
+                    consumed += drop
+                    del buf[:drop]
+                    continue
                 while len(buf) >= need:
                     hop = u8_from_s16le(bytes(buf[:need]))
                     del buf[:need]
-                    if not self._emit(party, run, hop):
-                        return
+                    t = (consumed // 2 + HOP_SAMPLES - FRAME_SAMPLES) / RATE
+                    consumed += need
+                    frame = _frame(t, hop)
+                    for sub in party.subs:
+                        sub.put(frame)
+        except asyncio.CancelledError:
+            raise                            # unregistered or shut down
         except Exception:
-            log.info("visuals: live source for %s ended", party.id, exc_info=True)
-        finally:
-            run.done = True
-            unregister = self._sources.get(party.id) is source
-            if unregister:
-                del self._sources[party.id]
+            log.info("visuals: live source for %s failed", party_id, exc_info=True)
+        # ended by itself or failed: unregister it
+        if self._sources.get(party_id) is source:
+            del self._sources[party_id]
+        if self._readers.get(party_id) is asyncio.current_task():
+            del self._readers[party_id]
 
     def _emit(self, party: _Party, run: _Run, hop: bytes) -> bool:
         """Publish one hop; False once ``run`` is no longer current."""
         if run.gen != party.gen or party.run is not run:
             return False
-        if not run.samples and run.uri:
+        if not run.samples:
             party.lead[run.uri] = min(MAX_LEAD, max(0.0, self._clock() - run.spawned_at))
             party.backoff.pop(run.uri, None)
             party.retry_at.pop(run.uri, None)
@@ -425,7 +464,7 @@ class Analyzer:
 
     async def _stop(self, party: _Party) -> None:
         """End the current run and drop whatever it queued."""
-        run, party.run, party.source = party.run, None, None
+        run, party.run, party.on_source = party.run, None, False
         party.gen += 1
         for sub in party.subs:
             sub.clear()
@@ -449,6 +488,8 @@ class Analyzer:
                 pass
 
     async def close(self) -> None:
+        for party_id in list(self._readers):
+            self.unregister_source(party_id)
         for party in list(self._parties.values()):
             if party.task is not None:
                 party.task.cancel()
@@ -478,6 +519,13 @@ def analyzer() -> Analyzer | None:
         for party_id, pcm in _pending_sources.items():
             _singleton.register_source(party_id, pcm)
     return _singleton
+
+
+def unregister_source(party_id: str) -> None:
+    """Phase 4 hook: stop analysing the party's live source."""
+    _pending_sources.pop(party_id, None)
+    if _singleton is not None:
+        _singleton.unregister_source(party_id)
 
 
 def register_source(party_id: str, pcm: AsyncIterator[bytes]) -> Callable[[], None]:
@@ -555,9 +603,18 @@ async def visual_socket(websocket: WebSocket) -> None:
                     break
                 receiving = asyncio.ensure_future(websocket.receive())
             if getting in done:
-                await websocket.send_text(json.dumps(getting.result(),
-                                                     separators=(",", ":")))
+                text = json.dumps(getting.result(), separators=(",", ":"))
                 getting = None
+                try:
+                    await asyncio.wait_for(websocket.send_text(text), SEND_TIMEOUT)
+                except TimeoutError:
+                    log.info("visual socket too slow; closing it")
+                    try:
+                        await asyncio.wait_for(
+                            websocket.close(code=CLOSE_TOO_SLOW, reason="too_slow"), 1)
+                    except Exception:
+                        pass
+                    break
             else:
                 getting.cancel()
                 getting = None

@@ -149,6 +149,8 @@ def test_ffmpeg_args_follow_the_brief():
                     "-f", "u8", "-ac", "1", "-ar", "22050", "pipe:1"]
     # input options must come before -i
     assert args.index("-headers") < args.index("-i")
+    assert args[args.index("-protocol_whitelist") + 1] == "https,tls,tcp,http"
+    assert args.index("-protocol_whitelist") < args.index("-i")
     no_headers = analysis.ffmpeg_args("ffmpeg", "https://u.test/a", {}, 0)
     assert "-headers" not in no_headers
 
@@ -429,6 +431,7 @@ async def test_registered_pcm_source():
     sub = an.subscribe("p1")
     samples = [0] * (HOP_SAMPLES - FRAME_SAMPLES) + [256] * FRAME_SAMPLES
     raw = struct.pack(f"<{len(samples)}h", *samples)
+    await until(lambda: an._parties["p1"].on_source)
     await feed.put(raw[:1001])               # odd split across chunks
     await feed.put(raw[1001:])
     frame = await asyncio.wait_for(sub.get(), 1)
@@ -610,4 +613,138 @@ async def test_hop_read_just_before_a_skip_is_not_published():
     await an._stop(party)                   # the skip
     assert an._emit(party, old, hop(1)) is False
     assert sub.queue.empty()
+    await an.close()
+
+
+# --- review fixes ----------------------------------------------------------------
+
+def test_ffmpeg_headers_are_sanitised():
+    args = analysis.ffmpeg_args("ffmpeg", "https://u.test/a", {
+        "User-Agent": "UA",
+        "X-Evil": "a\r\nCookie: stolen",
+        "Bad\nKey": "v",
+        "Has:Colon": "v",
+        "Referer": "https://www.youtube.com/",
+    }, 0)
+    assert args[args.index("-headers") + 1] == "User-Agent: UA\r\nReferer: https://www.youtube.com/\r\n"
+    only_bad = analysis.ffmpeg_args("ffmpeg", "https://u.test/a", {"X": "a\rb"}, 0)
+    assert "-headers" not in only_bad
+
+
+async def test_live_source_survives_idle_stop():
+    """I-1: the party's idle stop never ends a registered source; it keeps
+    being drained and frames come back with the next viewer."""
+    import struct
+    an, world, spawn, clock = make()
+    feed: asyncio.Queue = asyncio.Queue()
+    pulled = []
+
+    async def pcm():
+        while True:
+            chunk = await feed.get()
+            pulled.append(len(chunk))
+            yield chunk
+
+    an.register_source("p1", pcm())
+    hop_bytes = struct.pack(f"<{HOP_SAMPLES}h", *([256] * HOP_SAMPLES))
+    sub = an.subscribe("p1")
+    await until(lambda: an._parties["p1"].on_source)
+    await feed.put(hop_bytes)
+    await asyncio.wait_for(sub.get(), 1)
+    an.unsubscribe(sub)
+    clock.now += 10
+    await until(lambda: not an.running("p1"))
+    # nobody watching: still drained, no frames made
+    await feed.put(hop_bytes)
+    await feed.put(b"\x00")                 # an odd byte stays for alignment
+    await until(lambda: len(pulled) == 3)
+    assert "p1" in an._sources and not an._readers["p1"].done()
+    sub2 = an.subscribe("p1")
+    await until(lambda: an._parties["p1"].on_source)
+    await feed.put(b"\x01" + hop_bytes[:-1])  # completes the split sample
+    frame = await asyncio.wait_for(sub2.get(), 1)
+    # stream time kept counting while nobody watched: third hop of the stream
+    assert frame["t"] == round((2 * HOP_SAMPLES + HOP_SAMPLES - FRAME_SAMPLES) / RATE, 3)
+    assert spawn.procs == []
+    await an.close()
+
+
+async def test_live_source_unregisters_when_it_ends():
+    an, world, spawn, clock = make()
+    world.playing["p1"] = Playing(URI, 10.0, True)
+
+    async def pcm():
+        yield b"\x00\x00" * 10
+
+    an.register_source("p1", pcm())
+    await until(lambda: "p1" not in an._sources and "p1" not in an._readers)
+    an.subscribe("p1")
+    await until(lambda: spawn.procs)         # back on the track
+    await an.close()
+
+
+async def test_explicit_unregister_source():
+    an, world, spawn, clock = make()
+    world.playing["p1"] = Playing(URI, 10.0, True)
+    gate = asyncio.Event()
+
+    async def pcm():
+        await gate.wait()
+        yield b""
+
+    an.register_source("p1", pcm())
+    reader = an._readers["p1"]
+    an.subscribe("p1")
+    await until(lambda: an._parties["p1"].on_source)
+    an.unregister_source("p1")
+    await until(lambda: reader.done())
+    await until(lambda: spawn.procs)
+    await an.close()
+
+
+async def test_mid_track_death_backs_off():
+    an, world, spawn, clock = make()
+    world.playing["p1"] = Playing(URI, 10.0, True)
+    sub = an.subscribe("p1")
+    await until(lambda: spawn.procs)
+    spawn.procs[0].stdout.feed(hop(1))
+    await asyncio.wait_for(sub.get(), 1)
+    spawn.procs[0].stdout.end()             # died mid-track, after frames
+    world.playing["p1"] = Playing(URI, 30.0, True)   # far apart: would restart at once
+    await settle(50)
+    assert len(spawn.procs) == 1
+    clock.now += analysis.BACKOFF_MIN
+    await until(lambda: len(spawn.procs) == 2)
+    assert ss_of(spawn.procs[1].args) == 30.0
+    await an.close()
+
+
+async def test_ws_visual_closes_a_stuck_socket(home, fake_analyzer, monkeypatch):
+    an, world, spawn, clock = fake_analyzer
+    monkeypatch.setattr(analysis, "SEND_TIMEOUT", 0.05)
+    world.playing["p1"] = Playing(URI, 3.0, True)
+    incoming: asyncio.Queue = asyncio.Queue()
+    sent: list[dict] = []
+    await incoming.put({"type": "websocket.connect"})
+    never = asyncio.Event()
+
+    async def receive():
+        return await incoming.get()
+
+    async def send(msg):
+        if msg["type"] == "websocket.send":
+            await never.wait()               # the viewer stopped reading
+        sent.append(msg)
+
+    scope = {"type": "websocket", "asgi": {"version": "3.0"}, "http_version": "1.1",
+             "scheme": "ws", "path": "/ws/visual", "raw_path": b"/ws/visual",
+             "query_string": b"party=p1", "headers": [(b"host", b"sonora.local")],
+             "server": ("sonora.local", 80), "client": ("1.2.3.4", 1), "subprotocols": []}
+    task = asyncio.create_task(main.app(scope, receive, send))
+    await until(lambda: spawn.procs)
+    spawn.procs[0].stdout.feed(hop(3))
+    await asyncio.wait_for(task, 2)          # the endpoint gave up on its own
+    closes = [m for m in sent if m["type"] == "websocket.close"]
+    assert closes and closes[0]["code"] == analysis.CLOSE_TOO_SLOW
+    assert not an._parties["p1"].subs        # unsubscribed
     await an.close()
