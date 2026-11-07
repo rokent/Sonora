@@ -395,6 +395,15 @@ def test_ws_visual_is_pinned_for_user_guest_display_not_service():
     assert not allowed(None, "GET", "/ws/visual")
 
 
+def test_ws_tabsound_is_pinned_for_user_and_guest_only():
+    # A guest's target (running parties only, never a room) is checked in
+    # the handler: see test_home_tabsound.py.
+    for who in (USER_P, GUEST_P):
+        assert allowed(who, "GET", "/ws/tabsound"), who
+    for who in (DISPLAY_P, SERVICE_P, None):
+        assert not allowed(who, "GET", "/ws/tabsound"), who
+
+
 def test_is_user_means_a_person_only():
     assert USER_P.is_user
     for who in (SERVICE_P, GUEST_P, DISPLAY_P):

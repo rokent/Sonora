@@ -83,6 +83,8 @@ def install(app: FastAPI) -> None:
     app.include_router(analysis.router)
     from . import scream_routes  # Windows network sound card (Phase 4)
     app.include_router(scream_routes.router)
+    from . import tabsound  # send a browser tab's sound (Phase 4)
+    app.include_router(tabsound.router)
     _start_scream_with(app)
 
 

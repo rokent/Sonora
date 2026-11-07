@@ -1,7 +1,8 @@
 // One party: what it is playing and the buttons for it, the volume of the
 // whole party and of each room, its queue with who added what, and adding
-// songs. The household can also change its rooms, end it, or keep it as a
-// preset.
+// songs. Anyone in the party can also send a browser tab's sound to it or
+// drop music files into it. The household can also change its rooms, end it,
+// or keep it as a preset.
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useI18n } from '../i18n/index.jsx'
 import { useSystem } from '../lib/store.jsx'
@@ -9,6 +10,7 @@ import Art from '../components/Art.jsx'
 import * as Icon from '../components/Icons.jsx'
 import { homeApi } from './api.js'
 import AddSongs from './AddSongs.jsx'
+import SendSound from './SendSound.jsx'
 import ShowOnTv from './ShowOnTv.jsx'
 import RemoteBrowser from './RemoteBrowser.jsx'
 import VideoWindow from './VideoWindow.jsx'
@@ -34,6 +36,25 @@ function useLeftNotice(partyId) {
     return () => clearTimeout(timer)
   }, [lastPartyNotice, partyId])
   return shown ? { ...shown, room: zones[shown.zone]?.name || '' } : null
+}
+
+/** The AirPlay name that plays on this party ("Sonora: <party>"), if
+ * AirPlay is on. Asked again when the parties change. */
+function useAirPlayName(partyId) {
+  const { partiesEpoch } = useSystem()
+  const [name, setName] = useState('')
+  useEffect(() => {
+    let live = true
+    homeApi.airplayReceivers()
+      .then((list) => {
+        if (!live) return
+        const found = (Array.isArray(list) ? list : []).find((r) => r?.target?.kind === 'party' && r.target.id === partyId)
+        setName(found?.name || '')
+      })
+      .catch(() => { if (live) setName('') })
+    return () => { live = false }
+  }, [partyId, partiesEpoch])
+  return name
 }
 
 /** The party's queue, fetched again whenever the speakers say it changed. */
@@ -202,6 +223,12 @@ export default function PartyView({ id, data, isUser }) {
   const notice = useLeftNotice(id)
   const queueState = usePartyQueue(party)
   const [tab, setTab] = useState('queue')
+  const [addSource, setAddSource] = useState('music')
+  // The add tab stays mounted once opened, so file uploads go on under the
+  // queue tab.
+  const [addOpened, setAddOpened] = useState(false)
+  useEffect(() => { if (tab === 'add') setAddOpened(true) }, [tab])
+  const airplayName = useAirPlayName(id)
   const [error, setError] = useState('')
   const [ask, setAsk] = useState(null)
   const [presetName, setPresetName] = useState('')
@@ -329,6 +356,15 @@ export default function PartyView({ id, data, isUser }) {
         </section>
       )}
 
+      {!paused && (
+        <section className="hp-section hp-actions">
+          <SendSound target={`party:${party.id}`} />
+          <button type="button" className="hp-btn hp-btn--wide"
+                  onClick={() => { setAddSource('files'); setTab('add') }}>{t('home.files.add')}</button>
+          {airplayName && <p className="hp-muted hp-small">{t('home.airplay.partyHint', { name: airplayName })}</p>}
+        </section>
+      )}
+
       <div className="hp-tabs" role="tablist">
         <button type="button" role="tab" aria-selected={tab === 'queue'} className="hp-tab" onClick={() => setTab('queue')}>{t('home.tab.queue')}</button>
         {!paused && <button type="button" role="tab" aria-selected={tab === 'add'} className="hp-tab" onClick={() => setTab('add')}>{t('home.tab.add')}</button>}
@@ -336,7 +372,11 @@ export default function PartyView({ id, data, isUser }) {
       </div>
       <section className="hp-section">
         {tab === 'queue' && <Queue party={party} state={queueState} />}
-        {tab === 'add' && !paused && <AddSongs party={party} onAdded={queueState.reload} />}
+        {addOpened && !paused && (
+          <div hidden={tab !== 'add'}>
+            <AddSongs party={party} onAdded={queueState.reload} source={addSource} onSource={setAddSource} />
+          </div>
+        )}
         {tab === 'rooms' && isUser && <Rooms party={party} parties={data.parties} />}
       </section>
 

@@ -8,7 +8,9 @@
 // isQueueable for a favorite), so a station never lands in a queue here
 // either.
 //
-// A second tab adds YouTube videos (YouTubeSearch.jsx).
+// A second tab adds YouTube videos (YouTubeSearch.jsx), a third drops music
+// files (FileDrop.jsx). The files tab stays mounted once opened, so uploads
+// under way go on while another tab is shown.
 import React, { useEffect, useMemo, useState } from 'react'
 import { useI18n } from '../i18n/index.jsx'
 import { api } from '../lib/api.js'
@@ -19,6 +21,7 @@ import Art from '../components/Art.jsx'
 import { homeApi } from './api.js'
 import { errorText } from './partyKit.jsx'
 import YouTubeSearch from './YouTubeSearch.jsx'
+import FileDrop from './FileDrop.jsx'
 
 const SEARCH_DELAY_MS = 450
 
@@ -43,19 +46,30 @@ function Row({ item, state, onAdd }) {
   )
 }
 
-/** Where songs come from: the system's music services, or YouTube. */
-export default function AddSongs({ party, onAdded }) {
+/** Where songs come from: the system's music services, YouTube, or files.
+ * `source`/`onSource` let the party page open a tab (its "Add files"
+ * button); without them the tabs keep their own state. */
+export default function AddSongs({ party, onAdded, source: shown, onSource }) {
   const { t } = useI18n()
-  const [source, setSource] = useState('music')
+  const [own, setOwn] = useState('music')
+  const source = shown ?? own
+  const pick = onSource ?? setOwn
+  const [filesOpened, setFilesOpened] = useState(source === 'files')
+  useEffect(() => { if (source === 'files') setFilesOpened(true) }, [source])
+  const tab = (key, label) => (
+    <button type="button" role="tab" aria-selected={source === key} className="hp-tab"
+            onClick={() => pick(key)}>{label}</button>
+  )
   return (
     <>
       <div className="hp-tabs hp-tabs--sub" role="tablist">
-        <button type="button" role="tab" aria-selected={source === 'music'} className="hp-tab"
-                onClick={() => setSource('music')}>{t('home.add.music')}</button>
-        <button type="button" role="tab" aria-selected={source === 'youtube'} className="hp-tab"
-                onClick={() => setSource('youtube')}>{t('home.add.youtube')}</button>
+        {tab('music', t('home.add.music'))}
+        {tab('youtube', t('home.add.youtube'))}
+        {tab('files', t('home.add.files'))}
       </div>
-      {source === 'music' ? <MusicSearch party={party} onAdded={onAdded} /> : <YouTubeSearch party={party} onAdded={onAdded} />}
+      {source === 'music' && <MusicSearch party={party} onAdded={onAdded} />}
+      {source === 'youtube' && <YouTubeSearch party={party} onAdded={onAdded} />}
+      {filesOpened && <div hidden={source !== 'files'}><FileDrop party={party} onAdded={onAdded} /></div>}
     </>
   )
 }

@@ -146,6 +146,8 @@ export default function PartyList({ data, isUser }) {
             <PartyLink to="/party/ha-tokens" className="hp-btn hp-btn--wide">{t('home.hub.haTokens')}</PartyLink>
             <PartyLink to="/party/tvs" className="hp-btn hp-btn--wide">{t('home.hub.tvs')}</PartyLink>
             <PartyLink to="/party/displays" className="hp-btn hp-btn--wide">{t('home.hub.displays')}</PartyLink>
+            <PartyLink to="/party/windows-sound" className="hp-btn hp-btn--wide">{t('home.hub.windowsSound')}</PartyLink>
+            <PartyLink to="/party/airplay" className="hp-btn hp-btn--wide">{t('home.hub.airplay')}</PartyLink>
           </section>
         </>
       )}
