@@ -4,6 +4,7 @@ import { useSystem } from './lib/store.jsx'
 import Splash from './components/Splash.jsx'
 import LayoutShell from './parts/LayoutShell.jsx'
 import PartyApp from './home/PartyApp.jsx'
+import { withBase } from './lib/base.js'
 import { useMe } from './home/useMe.js'
 import { useI18n } from './i18n/index.jsx'
 import './home/home.css'
@@ -16,6 +17,8 @@ const LOOKING_GRACE_MS = 1500
 
 export default function App() {
   const me = useMe()
+  // Until we know who is looking, a guest must not glimpse the theme shell.
+  if (me.loading) return <div style={{ minHeight: '100%', background: 'var(--t-bg, #f6f6f7)' }} />
   // A guest has the party screens and nothing else.
   if (me.principal?.kind === 'guest') return <PartyApp />
   return <Household partiesLink={!!(me.auth && me.principal?.kind === 'user')} />
@@ -23,7 +26,7 @@ export default function App() {
 
 function PartiesButton() {
   const { t } = useI18n()
-  return <a className="home-parties-button" href="/party">{t('home.parties.button')}</a>
+  return <a className="home-parties-button" href={withBase('/party')}>{t('home.parties.button')}</a>
 }
 
 function Household({ partiesLink }) {

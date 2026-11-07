@@ -107,7 +107,7 @@ export async function request(path, { method = 'GET', body } = {}) {
     // back to this page. /api/me is the one call that asks without being sent.
     if (response.status === 401 && payload?.error === 'login' && path !== '/api/me') {
       try {
-        location.assign(withBase('/auth/login?next=' + encodeURIComponent(location.pathname)))
+        location.assign(withBase('/auth/login?next=' + encodeURIComponent('/' + location.pathname.replace(/^\/+/, ''))))
       } catch { /* no navigation: the error below still surfaces */ }
     }
     throw new ApiError(response.status, payload)

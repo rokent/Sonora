@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { useI18n } from '../i18n/index.jsx'
 import { joinAsGuest } from './api.js'
+import { withBase } from '../lib/base.js'
 import './home.css'
 
 const KEY = 'sonora.guestName'
@@ -13,7 +14,7 @@ export default function JoinPage() {
   const { t } = useI18n()
   const token = new URLSearchParams(window.location.search).get('token') || ''
   const [name, setName] = useState(remembered)
-  const [bad, setBad] = useState(!token)
+  const [bad, setBad] = useState(token ? '' : 'link')
   const [busy, setBusy] = useState(false)
 
   async function submit(event) {
@@ -24,9 +25,9 @@ export default function JoinPage() {
     try {
       await joinAsGuest(token, clean)
       try { localStorage.setItem(KEY, clean) } catch { /* not remembered */ }
-      window.location.assign('/party')
-    } catch {
-      setBad(true)
+      window.location.assign(withBase('/party'))
+    } catch (error) {
+      setBad(error?.status === 400 ? 'name' : error?.status === 403 ? 'link' : 'network')
       setBusy(false)
     }
   }
@@ -44,8 +45,8 @@ export default function JoinPage() {
           autoComplete="given-name"
           onChange={(e) => setName(e.target.value)}
         />
-        {bad && <p className="home-join__bad" role="alert">{t('home.join.bad')}</p>}
-        <button className="home-join__go" type="submit" disabled={busy || !name.trim()}>{t('home.join.go')}</button>
+        {bad && <p className="home-join__bad" role="alert">{t(bad === 'name' ? 'home.join.badName' : bad === 'network' ? 'home.join.network' : 'home.join.bad')}</p>}
+        <button className="home-join__go" type="submit" disabled={busy || !token || !name.trim()}>{t('home.join.go')}</button>
       </form>
     </main>
   )

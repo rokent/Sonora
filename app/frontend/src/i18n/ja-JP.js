@@ -1271,4 +1271,6 @@ export default {
   'home.join.bad': 'This invite link is no longer valid. Ask the host for a new one.',
   'home.parties.button': 'Parties',
   'home.parties.title': 'Parties',
+  'home.join.badName': 'Please enter a first name the host can recognise.',
+  'home.join.network': 'Could not reach the speakers. Check your connection and try again.',
 }
