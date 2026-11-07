@@ -10,7 +10,10 @@ Who may send where (spec, Phase 4 Global Constraints): a household member
 any party or room; a guest only a running party, never a bare room. The
 permission rules let both open the socket; the target rule is enforced here.
 
-The session starts on the first sound, not on connect, so sharing a quiet tab
+The ffmpeg decoder starts with the first binary message (an idle socket
+costs no process), and at most ``MAX_DECODERS`` run at once, at most
+``MAX_PER_PRINCIPAL`` per person. The session starts on the first sound, not
+on connect, so sharing a quiet tab
 does not cut into the queue. After the hub ends it for silence (the tab
 paused), the next sound starts a new one. A newer sender on the same target,
 the party ending, or the server stopping close the socket instead.
@@ -24,8 +27,11 @@ handshake (4xxx, with the reason as the error word):
 * 4403 ``forbidden``       a guest asked for a room
 * 4404 ``unknown_target``  no such running party or room
 * 4409 ``replaced``        someone else started sending to the same target
+  (or the room was taken into a party)
 * 4410 ``party_ended``     the party ended
 * 4413 ``too_large``       a message over ``MAX_MESSAGE``
+* 4429 ``too_many``        too many tabs sending at once (``MAX_DECODERS`` in
+  all, ``MAX_PER_PRINCIPAL`` per person)
 * 4500 ``decoder_stopped`` the decoder exited or stalled
 * 4503 ``not_ready`` / ``no_decoder`` / ``shutdown``
 """
@@ -49,6 +55,11 @@ router = APIRouter()
 MAX_MESSAGE = 256 * 1024
 #: How long a write into the decoder may take before it counts as stalled.
 WRITE_TIMEOUT = 5.0
+#: Decoders (ffmpeg processes) running at once, in all and per principal.
+MAX_DECODERS = 8
+MAX_PER_PRINCIPAL = 2
+#: ``{principal key: decoders running}``.
+_running: dict[str, int] = {}
 
 DECODER_ARGS = ["-nostdin", "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer",
                 "-f", "webm", "-i", "pipe:0",
@@ -61,8 +72,8 @@ spawn = live.spawn_ffmpeg
 
 #: Why a session ended -> how the socket closes. Other reasons (idle,
 #: encoder trouble) let the next sound start a fresh session.
-_FINAL = {"replaced": (4409, "replaced"), "party_ended": (4410, "party_ended"),
-          "shutdown": (4503, "shutdown")}
+_FINAL = {"replaced": (4409, "replaced"), "joined_party": (4409, "replaced"),
+          "party_ended": (4410, "party_ended"), "shutdown": (4503, "shutdown")}
 
 
 class Stop(Exception):
@@ -94,6 +105,26 @@ def check_target(target: live.Target, principal: Any) -> None:
         raise Stop(4404, "unknown_target")
 
 
+def _principal_key(principal: Any) -> str:
+    return f"{getattr(principal, 'kind', '')}:{getattr(principal, 'id', '') or id(principal)}"
+
+
+def _take_slot(key: str) -> bool:
+    """Count one more decoder for ``key``, unless a cap is reached."""
+    if sum(_running.values()) >= MAX_DECODERS or _running.get(key, 0) >= MAX_PER_PRINCIPAL:
+        return False
+    _running[key] = _running.get(key, 0) + 1
+    return True
+
+
+def _free_slot(key: str) -> None:
+    left = _running.get(key, 0) - 1
+    if left > 0:
+        _running[key] = left
+    else:
+        _running.pop(key, None)
+
+
 def source_name(principal: Any) -> str:
     name = str(getattr(principal, "name", "") or "").strip()[:60]
     return f"{name} (tab)" if name else "Browser tab"
@@ -103,7 +134,7 @@ class TabSender:
     """One tab's decoded sound into live sessions on one target."""
 
     def __init__(self, websocket: WebSocket, target: live.Target, principal: Any,
-                 decoder: live.Pipe) -> None:
+                 decoder: live.Pipe | None = None) -> None:
         self.ws, self.target, self.principal, self.decoder = websocket, target, principal, decoder
         self.session: Any = None
         self.state: str | None = None
@@ -125,7 +156,7 @@ class TabSender:
                 raise Stop(*final)
             session = self.session = None
         if session is None:
-            if not any(pcm):
+            if live.is_quiet(pcm, PCM_FORMAT):
                 await self.tell("waiting")
                 return
             check_target(self.target, self.principal)   # a guest's party may have ended
@@ -161,6 +192,8 @@ class TabSender:
                 await session.end("disconnected")
             except Exception:
                 log.exception("tab sound: ending the session failed")
+        if self.decoder is None:
+            return
         try:
             await asyncio.wait_for(self.decoder.close(), 2.0)
         except Exception:
@@ -199,21 +232,17 @@ async def tab_sound(websocket: WebSocket) -> None:
     except routes.Refused:
         await _close(websocket, 4503, "not_ready")
         return
-    try:
-        decoder = await spawn(list(DECODER_ARGS))
-    except Exception as exc:
-        log.warning("tab sound: no decoder: %s", exc)
-        await _close(websocket, 4503, "no_decoder")
-        return
-    sender = TabSender(websocket, target, principal, decoder)
+    sender = TabSender(websocket, target, principal)
     await sender.tell("waiting")
+    key = _principal_key(principal)
+    slot = False
     receiving: asyncio.Future = asyncio.ensure_future(websocket.receive())
-    pumping: asyncio.Future = asyncio.ensure_future(sender.pump())
+    pumping: asyncio.Future | None = None
     try:
         while True:
-            done, _ = await asyncio.wait({receiving, pumping},
-                                         return_when=asyncio.FIRST_COMPLETED)
-            if pumping in done:
+            waiting = {receiving} if pumping is None else {receiving, pumping}
+            done, _ = await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+            if pumping is not None and pumping in done:
                 code, reason = pumping.result()
                 await _close(websocket, code, reason)
                 return
@@ -225,8 +254,21 @@ async def tab_sound(websocket: WebSocket) -> None:
                 if len(data) > MAX_MESSAGE:
                     await _close(websocket, 4413, "too_large")
                     return
+                if sender.decoder is None:
+                    # The decoder starts with the first chunk, within the caps.
+                    if not _take_slot(key):
+                        await _close(websocket, 4429, "too_many")
+                        return
+                    slot = True
+                    try:
+                        sender.decoder = await spawn(list(DECODER_ARGS))
+                    except Exception as exc:
+                        log.warning("tab sound: no decoder: %s", exc)
+                        await _close(websocket, 4503, "no_decoder")
+                        return
+                    pumping = asyncio.ensure_future(sender.pump())
                 try:
-                    await asyncio.wait_for(decoder.write(data), WRITE_TIMEOUT)
+                    await asyncio.wait_for(sender.decoder.write(data), WRITE_TIMEOUT)
                 except TimeoutError:
                     await _close(websocket, 4500, "decoder_stopped")
                     return
@@ -234,8 +276,11 @@ async def tab_sound(websocket: WebSocket) -> None:
     except Exception:
         log.debug("tab sound socket closed", exc_info=True)
     finally:
-        for fut in (receiving, pumping):
+        futures = [f for f in (receiving, pumping) if f is not None]
+        for fut in futures:
             if not fut.done():
                 fut.cancel()
-        await asyncio.gather(receiving, pumping, return_exceptions=True)
+        await asyncio.gather(*futures, return_exceptions=True)
         await sender.close()
+        if slot:
+            _free_slot(key)
