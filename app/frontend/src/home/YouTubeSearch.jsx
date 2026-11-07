@@ -91,7 +91,7 @@ export default function YouTubeSearch({ party, onAdded }) {
     <div className="hp-add">
       <form className="hp-inline" onSubmit={addLink}>
         <label className="hp-label hp-sr" htmlFor="hp-yt-link">{t('home.youtube.link')}</label>
-        <input id="hp-yt-link" className="hp-input" type="url" inputMode="url" value={link} autoComplete="off"
+        <input id="hp-yt-link" className="hp-input" type="text" inputMode="url" value={link} autoComplete="off"
                maxLength={300} placeholder={t('home.youtube.link')} onChange={(e) => setLink(e.target.value)} />
         <button type="submit" className="hp-btn" disabled={linkBusy || !link.trim()}>{t('home.add.add')}</button>
       </form>
