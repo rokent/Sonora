@@ -157,7 +157,7 @@ class PartyEngine:
         self._stacks: dict[str, list[dict]] = {}
         #: ``{party: {uri: [{"id", "name"}, ...]}}``, oldest adder first.
         self._added: dict[str, dict[str, list[dict]]] = {}
-        #: Called with the party id after a party has ended and been removed.
+        #: Called with a party's id as it ends; see ``on_end`` for when.
         self._end_listeners: list[Callable[[str], Awaitable[None] | None]] = []
         #: Held while a party changes, so changes run one at a time and the
         #: topology events Sonora's own regrouping brings are not read as
@@ -411,8 +411,27 @@ class PartyEngine:
         return {**asdict(party), "report": {k: report.get(k) for k in ("set", "missing", "failed")}}
 
     def on_end(self, callback: Callable[[str], Awaitable[None] | None]) -> None:
-        """Call ``callback(party_id)`` after a party has ended and been removed."""
+        """Call ``callback(party_id)`` whenever a party ends. Any number of
+        listeners; each may be sync or async.
+
+        Order inside ``end``: the party is first forgotten (removed from the
+        engine and saved, so e.g. new file uploads for it are refused), then
+        every listener runs, then the speakers are released. So listeners run
+        after the party is gone but before its speakers are let go (live sound
+        stops before the speakers rejoin their old groups). They run while the
+        engine holds its lock, so they must not call back into the engine's
+        locked methods. A failing listener is logged and does not stop the
+        others or the end itself."""
         self._end_listeners.append(callback)
+
+    async def _fire_end(self, party_id: str) -> None:
+        for callback in list(self._end_listeners):
+            try:
+                result = callback(party_id)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                log.exception("parties: an on_end listener failed for %s", party_id)
 
     async def end(self, party_id: str) -> dict:
         """End the party: each speaker rejoins the party it was taken from if
@@ -426,15 +445,9 @@ class PartyEngine:
             del self._parties[party_id]
             self._added.pop(party_id, None)
             self._save()
+            await self._fire_end(party_id)
             report = await self._release(plans)
             self._save()
-        for callback in list(self._end_listeners):
-            try:
-                result = callback(party_id)
-                if inspect.isawaitable(result):
-                    await result
-            except Exception:
-                log.exception("parties: an on_end listener failed for %s", party_id)
         return {"id": party_id, "name": party.name, **report}
 
     async def add_speaker(self, party_id: str, zone: str, by: Actor, take: bool = False) -> dict:

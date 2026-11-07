@@ -48,6 +48,7 @@ PUBLIC: list[tuple[str, re.Pattern]] = [
     _rule("GET", rf"/api/stream/audio/{_SEG}"),   # fetched by speakers
     _rule("GET", r"/api/art"),                    # fetched by speakers and <img>
     _rule("GET", r"/api/home/media/.+"),          # Phase 2+ media for speakers
+    _rule("GET", r"/api/home/live/.+"),           # Phase 4 live sound for speakers
     _rule("GET", r"/api/home/files/.+"),          # dropped files, for speakers
     _rule("GET", r"/api/health"),                 # backend.healthcheck
 ]

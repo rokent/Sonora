@@ -108,6 +108,7 @@ EXPECTED_GUEST_READS = {
     ("GET", "/api/art"),
     ("GET", "/api/stream/audio/{key}"),
     ("GET", "/api/home/media/{key}.m4a"),          # public: speakers
+    ("GET", "/api/home/live/{key}.mp3"),           # public: speakers
     ("GET", "/api/home/files/{name}"),             # public: speakers
     ("GET", "/api/state"),
     ("GET", "/api/home/config"),
@@ -171,6 +172,7 @@ EXPECTED_DISPLAY_REACHABLE = {
     ("GET", "/api/art"),
     ("GET", "/api/stream/audio/{key}"),
     ("GET", "/api/home/media/{key}.m4a"),
+    ("GET", "/api/home/live/{key}.mp3"),
     ("GET", "/api/home/files/{name}"),
     # DISPLAY
     ("GET", "/api/state"),
@@ -239,6 +241,7 @@ def test_public_needs_no_principal():
                          ("POST", "/auth/guest"), ("POST", "/auth/logout"),
                          ("GET", "/api/me"), ("GET", "/api/stream/audio/k1"),
                          ("GET", "/api/art"), ("GET", "/api/home/media/a/b.mp3"),
+                         ("GET", "/api/home/live/k1.mp3"), ("HEAD", "/api/home/live/k1.mp3"),
                          ("GET", "/api/health")):
         assert allowed(None, method, path), (method, path)
     for method, path in (("GET", "/api/state"), ("GET", "/ws"), ("GET", "/party"),
