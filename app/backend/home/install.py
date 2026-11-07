@@ -61,3 +61,5 @@ def install(app: FastAPI) -> None:
     app.include_router(auth_routes.router)
     app.include_router(routes.router)
     app.include_router(pages)
+    from . import media  # YouTube relay for speakers (Phase 2)
+    app.include_router(media.router)
