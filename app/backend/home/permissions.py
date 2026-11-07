@@ -7,7 +7,8 @@ Three answers, in order:
   what the speakers themselves fetch (streams, art, Sonora Home media), since
   a speaker carries no session.
 * A household member (``user``) reaches everything. A ``service`` (Home
-  Assistant's bearer token) reaches only ``/api/ha/``.
+  Assistant's bearer token) reaches only ``/api/ha/``. A ``display`` (a TV
+  let in with a display link) is read-only: only what ``DISPLAY`` lists.
 * A ``guest`` is default-deny: only what ``GUEST`` lists. A route Sonora adds
   upstream is therefore closed to guests until someone opens it here on
   purpose.
@@ -24,7 +25,7 @@ from urllib.parse import urlencode
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from .auth import SESSION_COOKIE, Principal, principal_of
+from .auth import SESSION_COOKIE, Principal, display_session_removed, principal_of
 
 _SEG = r"[^/]+"
 
@@ -38,6 +39,7 @@ def _rule(method: str, pattern: str) -> tuple[str, re.Pattern]:
 PUBLIC: list[tuple[str, re.Pattern]] = [
     _rule("GET", r"/"),
     _rule("GET", r"/join"),                       # the guest join page
+    _rule("GET", r"/tv"),                         # TV mode shell; it says when a link was removed
     _rule("GET", r"/assets/.+"),                  # the hashed bundle
     _rule("GET", r"/(favicon\.ico|apple-touch-icon\.png|manifest\.webmanifest"
                  r"|icon-\d+\.png)"),             # root files the page links
@@ -73,6 +75,20 @@ GUEST: list[tuple[str, re.Pattern]] = [
     _rule("GET", r"/api/themes(/.*)?"),
 ]
 
+#: What a ``display`` (a TV screen) may reach: reads that follow a party, and
+#: nothing that changes anything. ``/tv`` and ``/api/art`` are public too.
+DISPLAY: list[tuple[str, re.Pattern]] = [
+    _rule("GET", r"/api/state"),
+    _rule("GET", r"/ws"),
+    _rule("GET", r"/ws/visual"),
+    _rule("GET", r"/api/parties"),
+    _rule("GET", rf"/api/parties/{_SEG}/queue"),
+    _rule("GET", r"/api/home/config"),
+    _rule("GET", r"/api/art"),
+    _rule("GET", r"/api/displays/me"),
+    _rule("GET", r"/tv"),
+]
+
 #: Where a ``service`` principal (Home Assistant) may go.
 SERVICE_PREFIX = "/api/ha/"
 
@@ -93,7 +109,11 @@ def allowed(principal: Principal | None, method: str, path: str) -> bool:
         return True
     if principal.kind == "service":
         return path.startswith(SERVICE_PREFIX)
-    return _matches(GUEST, method, path)
+    if principal.kind == "display":
+        return _matches(DISPLAY, method, path)
+    if principal.kind == "guest":
+        return _matches(GUEST, method, path)
+    return False
 
 
 def _principal(connection) -> Principal | None:
@@ -103,7 +123,7 @@ def _principal(connection) -> Principal | None:
 
 def _is_page(method: str, path: str) -> bool:
     """A browser loading a page, as opposed to the interface calling the API."""
-    return (method in ("GET", "HEAD") and path != "/ws"
+    return (method in ("GET", "HEAD") and path not in ("/ws", "/ws/visual")
             and not path.startswith(("/api/", "/auth/")))
 
 
@@ -119,12 +139,18 @@ async def guard(request: Request, call_next):
             target = path + (f"?{request.url.query}" if request.url.query else "")
             return RedirectResponse("/auth/login?" + urlencode({"next": target}),
                                     status_code=302)
-        return JSONResponse({"error": "login"}, status_code=401)
+        # A TV whose display link was deleted: say so, so it shows that
+        # rather than a sign-in prompt nobody at a TV can answer.
+        error = ("display_removed"
+                 if display_session_removed(request.cookies.get(SESSION_COOKIE))
+                 else "login")
+        return JSONResponse({"error": error}, status_code=401)
     return JSONResponse({"error": "forbidden"}, status_code=403)
 
 
 def ws_allowed(websocket) -> bool:
-    """Whether this socket's principal may open ``/ws``. HTTP middleware never
+    """Whether this socket's principal may open ``/ws`` (or ``/ws/visual``):
+    users, guests and displays may. HTTP middleware never
     sees a socket, so the endpoint asks this itself."""
     principal = _principal(websocket)
     websocket.state.principal = principal

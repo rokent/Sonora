@@ -216,6 +216,22 @@ async def test_guest_list_hides_presets(rig):
     assert len((await client(USER).request("GET", "/api/parties")).json()["presets"]) == 1
 
 
+async def test_display_sees_what_a_guest_sees(rig):
+    """A TV screen is read-only and gets the guest's view: running parties,
+    no presets, a party's queue."""
+    from backend.home.auth import DisplayLinks
+    link, _ = DisplayLinks().create("TV")
+    tv = client(Principal("display", link["id"], "TV"))
+    await client(USER).request("POST", "/api/presets", {"name": "P", "speakers": ["A"]})
+    party = (await _start()).json()
+    listed = (await tv.request("GET", "/api/parties")).json()
+    assert [p["id"] for p in listed["parties"]] == [party["id"]]
+    assert listed["presets"] == []
+    assert (await tv.request("GET", f"/api/parties/{party['id']}/queue")).status == 200
+    assert (await tv.request("POST", f"/api/parties/{party['id']}/join")).status == 403
+    assert (await tv.request("GET", "/api/presets")).status == 403
+
+
 async def test_guest_queue_attribution_and_removal(rig):
     party = (await _start()).json()
     pid = party["id"]

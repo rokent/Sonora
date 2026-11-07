@@ -167,9 +167,10 @@ def _with_members(party: dict) -> dict:
 
 
 def _party(party_id: str, who: Principal) -> dict:
-    """The party, as ``who`` may see it: a guest sees only running ones."""
+    """The party, as ``who`` may see it: a guest (or a display) sees only
+    running ones."""
     found = engine().get(party_id)
-    if found is None or (who.is_guest and not found["speakers"]):
+    if found is None or (not who.is_user and not found["speakers"]):
         raise Refused(404, "not_found", message=party_id)
     return found
 
@@ -277,10 +278,11 @@ async def _start(who: Principal, *, name: str | None, speakers: list[str] | None
 async def list_parties(request: Request):
     who = request_principal(request)
     try:
-        found = [_with_members(p) for p in engine().list() if not who.is_guest or p["speakers"]]
+        found = [_with_members(p) for p in engine().list() if who.is_user or p["speakers"]]
     except Refused as exc:
         return _answer(exc)
-    return {"parties": found, "presets": [] if who.is_guest else presets().list()}
+    # Guests and displays (TV screens) see running parties and no presets.
+    return {"parties": found, "presets": presets().list() if who.is_user else []}
 
 
 @router.post("/api/parties")
