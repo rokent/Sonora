@@ -722,6 +722,14 @@ class LiveHub:
             zone = self._resolve(target)
             if zone is None:
                 return      # the party is gone
+            coordinator = self._coordinator(zone)
+            for other in list(self._current):
+                other_zone = self._resolve(other)
+                if other_zone is not None and self._coordinator(other_zone) == coordinator:
+                    # A newer session on another target streams to the same
+                    # speakers: seeking now would cut it. It owns the way back.
+                    self._resume.setdefault(other, point)
+                    return
             try:
                 zone = self._controller.coordinator_of(zone).uuid
             except KeyError:
@@ -757,6 +765,9 @@ class LiveHub:
         """The parties changed (not awaited): a room session whose room is
         now in a running party ends without a resume (the party has the
         room's speakers now)."""
+        for target, pending in list(self._resuming.items()):
+            if target[0] == "zone" and self._party_holding(target[1]) is not None:
+                self._skip.add(pending)     # the party has the room's speakers now
         for target, session in list(self._current.items()):
             if target[0] != "zone" or self._party_holding(target[1]) is None:
                 continue

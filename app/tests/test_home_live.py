@@ -455,6 +455,54 @@ async def test_a_room_joining_a_party_mid_live_ends_its_session_without_resume()
     assert t.hub.current(("zone", "RINCON_A")) is None
 
 
+async def _grouped_hub():
+    t = make_hub()
+    t.ctl.zones["RINCON_B"] = SimpleNamespace(uuid="RINCON_B", host="10.0.0.6",
+                                              transport=transport(uri="x-rincon:RINCON_A"))
+    return t
+
+
+async def test_a_pending_resume_does_not_cut_a_newer_session_on_the_same_coordinator():
+    t = await _grouped_hub()
+    a = await t.hub.start(target=("party", "p1"), source_name="A", by="u")
+    t.ctl.zones["RINCON_A"].transport = transport(
+        track=1, uri=f"x-rincon-mp3radio://10.0.0.2:8080/api/home/live/{a.key}.mp3")
+    await t.hub._lock.acquire()                 # B's start gets the lock before A's resume
+    b_start = asyncio.ensure_future(t.hub.start(target=("zone", "RINCON_B"), source_name="B", by="u"))
+    await _settle()
+    t.clock.now += 9
+    a_end = asyncio.ensure_future(a.check_idle())   # A ends on silence: resume pending
+    await _settle()
+    assert a.ended and t.commands.resumes() == []
+    t.hub._lock.release()
+    b = await asyncio.wait_for(b_start, 1)
+    await asyncio.wait_for(a_end, 1)
+    await _settle()
+    assert t.commands.resumes() == []           # nothing seeks under B's live sound
+    assert not b.ended and t.hub.current(("zone", "RINCON_B")) is b
+    assert t.hub._resume[("zone", "RINCON_B")]["track_no"] == 3
+    await b.end("idle")
+    assert t.commands.resumes() == [("seek_track", "RINCON_A", 3),
+                                    ("seek_time", "RINCON_A", "0:01:05"),
+                                    ("play", "RINCON_A")]
+
+
+async def test_a_pending_room_resume_is_skipped_when_the_room_joins_a_party():
+    t = make_hub()
+    s = await t.hub.start(target=("zone", "RINCON_A"), source_name="A", by="u")
+    await t.hub._lock.acquire()
+    t.clock.now += 9
+    ending = asyncio.ensure_future(s.check_idle())
+    await _settle()
+    assert ("zone", "RINCON_A") in t.hub._resuming
+    t.members["RINCON_A"] = "p1"
+    t.hub.rooms_changed()
+    t.hub._lock.release()
+    await asyncio.wait_for(ending, 1)
+    await _settle()
+    assert t.commands.resumes() == []
+
+
 async def test_live_routes_hub_follows_party_changes(monkeypatch):
     from backend.home import routes
     live_routes.reset()
