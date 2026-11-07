@@ -26,7 +26,8 @@ screen link was removed".
 ## Modes
 
 - **Video.** Full-screen video when the track comes from YouTube; the cover
-  otherwise.
+  otherwise. If a speaker will not play YouTube items at all, set
+  `SONORA_YOUTUBE_FORMAT=aac` (see [youtube.md](youtube.md)).
 - **Visualizer.** MilkDrop-style visuals that change preset every 30 seconds.
   Tap the screen for the next one.
 - **Cover and lyrics.** Large cover art, title, artist and the rooms playing.
