@@ -77,7 +77,16 @@ class _Commands:
     async def add_to_queue(self, zone, uri, metadata="", *, next_=False, position=0):
         self.calls.append(("add", zone, uri))
         self._q(zone).append({"id": f"Q:0/{len(self._q(zone)) + 1}", "uri": uri, "title": uri})
-        return {"first_track": len(self._q(zone)), "added": 1}
+        # As the speaker answers AddURIToQueue.
+        return {"FirstTrackNumberEnqueued": str(len(self._q(zone))), "NumTracksAdded": "1",
+                "NewQueueLength": str(len(self._q(zone)))}
+
+    async def set_source(self, zone, uri, metadata=""):
+        self.calls.append(("set_source", zone, uri))
+        self.c.zones[self.c.lead[zone]].transport = SimpleNamespace(media_uri=uri)
+
+    async def seek_track(self, zone, index):
+        self.calls.append(("seek_track", zone, index))
 
     async def remove_from_queue(self, zone, index):
         self.calls.append(("remove", zone, index))
@@ -459,3 +468,59 @@ async def test_engine_first_read_failure_is_logged(rig, monkeypatch, caplog):
     assert r.status == 200
     await asyncio.gather(*list(routes._tasks))
     assert any("first read of the speakers failed" in rec.getMessage() for rec in caplog.records)
+
+
+# -- a party lead playing something else when a song is added -----------------
+
+AIRPLAY = "x-sonos-vli:RINCON_C43875C3DCEC01400:1,airplay:04470cd8"
+
+
+def _on(rig, zone, uri):
+    rig.ctl.zones[zone].transport = SimpleNamespace(media_uri=uri)
+
+
+async def test_a_quiet_party_start_points_the_lead_at_its_queue(rig):
+    _on(rig, "A", AIRPLAY)
+    pid = (await _start()).json()["id"]
+    assert ("set_source", "A", "x-rincon-queue:A#0") in rig.cmds.calls
+    assert routes.engine().get(pid)["own_source"] is None
+
+
+async def test_party_queue_add_off_the_queue_plays_the_added_track(rig):
+    pid = (await _start()).json()["id"]
+    _on(rig, "A", AIRPLAY)                 # the iPhone took the Roam back over AirPlay
+    rig.ctl.queues["A"].append({"id": "Q:0/1", "uri": "x-file:old", "title": "old"})
+    rig.cmds.calls.clear()
+    r = await client(GUEST).request("POST", f"/api/parties/{pid}/queue", {"uri": "x-file:9", "metadata": "m"})
+    assert r.status == 200
+    assert rig.cmds.calls == [("add", "A", "x-file:9"), ("set_source", "A", "x-rincon-queue:A#0"),
+                              ("seek_track", "A", 2), ("play", "A")]
+    # Next now moves through the party's queue, not the iPhone's
+    await client(GUEST).request("POST", f"/api/parties/{pid}/transport/next")
+    assert rig.cmds.calls[-1] == ("next", "A")
+    assert rig.ctl.zones["A"].transport.media_uri == "x-rincon-queue:A#0"
+    assert routes.engine().get(pid)["speakers"] == ["A", "B"]
+
+
+async def test_party_queue_add_on_the_queue_only_enqueues(rig):
+    pid = (await _start()).json()["id"]
+    assert rig.ctl.zones["A"].transport.media_uri == "x-rincon-queue:A#0"
+    rig.cmds.calls.clear()
+    await client(GUEST).request("POST", f"/api/parties/{pid}/queue", {"uri": "x-file:9", "metadata": "m"})
+    assert rig.cmds.calls == [("add", "A", "x-file:9")]
+
+
+async def test_sonora_enqueue_on_a_party_off_its_queue_plays_the_added_track(rig, monkeypatch):
+    pid = (await _start()).json()["id"]
+    _on(rig, "A", AIRPLAY)
+
+    async def items(commands, host):
+        return [{"uri": i["uri"], "metadata": ""} for i in rig.ctl.queues[host[1:]]]
+    monkeypatch.setattr(scenes, "_queue_items", items)
+    rig.cmds.calls.clear()
+    r = await client(USER).request("POST", "/api/zones/B/source",
+                                   {"uri": "x-file:9", "metadata": "<m/>", "enqueue": True})
+    assert r.status == 200
+    assert rig.cmds.calls == [("add", "B", "x-file:9"), ("set_source", "A", "x-rincon-queue:A#0"),
+                              ("seek_track", "A", 1), ("play", "A")]
+    assert routes.engine().get(pid)["speakers"] == ["A", "B"]

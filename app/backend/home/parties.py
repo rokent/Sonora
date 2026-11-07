@@ -114,8 +114,8 @@ class Party:
     preset_id: str | None = None
     created: float = 0.0
     #: The source the party itself put on its lead when that is not the
-    #: lead's queue: a television, a line-in, a station from the starting
-    #: music, or (for a party that started quiet) what the lead had loaded.
+    #: lead's queue: a television, a line-in or a station from the starting
+    #: music. A party that started quiet has its lead on its queue.
     own_source: str | None = None
     #: The queue and attribution kept while the party has no speakers:
     #: ``{"items": [{uri, metadata}], "added": {uri: [adders]}}``.
@@ -147,6 +147,14 @@ def _public(party: Party) -> dict:
     out.pop("seen", None)
     out["kept_queue"] = len((kept or {}).get("items") or [])
     return out
+
+
+def _first_track(result: dict | None) -> int | None:
+    """The place a speaker says an add landed (AddURIToQueue's answer)."""
+    try:
+        return int((result or {}).get("FirstTrackNumberEnqueued") or 0) or None
+    except (TypeError, ValueError):
+        return None
 
 
 def _split(before: dict | None, speakers: list[str]) -> dict[str, dict | None]:
@@ -404,7 +412,7 @@ class PartyEngine:
         except Exception as exc:                      # noqa: BLE001 - the speaker joins all the same
             log.info("party %r: its queue could not be put back on %s: %s", party.name, zone, exc)
 
-    def _own_source(self, music: dict | None, lead: str, record: dict | None) -> str | None:
+    def _own_source(self, music: dict | None, lead: str) -> str | None:
         """The source the party puts on ``lead`` when it is not the queue."""
         kind = (music or {}).get("kind")
         if kind == "tv":
@@ -417,9 +425,25 @@ class PartyEngine:
             if music.get("item_kind") == "audiobook" or (queueable is not None and not queueable(uri)):
                 return uri or None
             return None
-        # Quiet: the lead keeps what it had loaded.
+        # Quiet: the lead is on the party's queue (``_to_queue``).
+        return None
+
+    async def _to_queue(self, lead: str, record: dict | None) -> None:
+        """Point a quiet party's lead at its own queue, left as it is and not
+        played. What the lead had on (AirPlay from a phone, a station, the
+        TV) is already written down for the way back; left on, a guest's
+        Play would resume the phone and Next would skip the phone's tracks
+        (seen on a Roam 2, 2026-11-07). A lead already on its queue is left
+        where it stands, so its place in the queue is kept."""
         room = ((record or {}).get("rooms") or {}).get(lead) or {}
-        return (room.get("transport") or {}).get("media_uri") or None
+        loaded = (room.get("transport") or {}).get("media_uri") or self._media_of(lead)
+        queue = f"x-rincon-queue:{lead}#0"
+        if loaded == queue:
+            return
+        try:
+            await self._commands.set_source(lead, queue, "")
+        except Exception as exc:                      # noqa: BLE001 - the party starts all the same
+            log.info("party: %s could not be pointed at its queue: %s", lead, exc)
 
     async def _hand_over(self, party: Party, zone: str) -> None:
         """Before ``zone`` leaves ``party``, give the group's lead to the next
@@ -543,10 +567,13 @@ class PartyEngine:
                 self._save()
                 raise NoSpeakers("what the speakers were could not be written down")
             await self._keep_queue(records[held[0]], held[0])
+            play = scene["groups"][0]["play"]
+            if play is None or play["kind"] == "silence":
+                await self._to_queue(held[0], records[held[0]])
             party = Party(id="pt_" + secrets.token_hex(6), name=scene["name"], owner=by.id, owner_name=by.name,
                           household=household, speakers=held, volumes={z: v for z, v in volumes.items() if z in held},
                           state="playing", preset_id=preset_id, created=time.time(),
-                          own_source=self._own_source(scene["groups"][0]["play"], held[0], records[held[0]]))
+                          own_source=self._own_source(play, held[0]))
             self._parties[party.id] = party
             for zone in held:
                 self._push(zone, party.id, records[zone])
@@ -652,6 +679,51 @@ class PartyEngine:
             self._save()
             return self.get(party_id)
 
+
+    # -- a song added -------------------------------------------------------
+
+    async def play_added(self, party_id: str, uri: str, result: dict | None = None,
+                         position: int | None = None) -> bool:
+        """A song was just added to the party's queue. When the lead is on
+        some other source (a phone over AirPlay, a station, the TV), point
+        it at the queue and play from the added track, so the guest hears
+        it and Next moves through the party's queue, not the other source.
+        A lead already on its queue is left alone. Its place is
+        ``position``, else the speaker's answer to the add (``result``),
+        else the added URI's last copy in the queue. Says whether the lead
+        was switched.
+
+        Done under the engine's lock, and the party's own source is the
+        queue from here on, not yet seen: a report of what the lead had
+        before the switch, still on its way, is not read as someone else
+        playing on the party's speakers."""
+        async with self._lock:
+            party = self._running(party_id)
+            if party is None:
+                return False
+            lead = party.speakers[0]
+            queue = f"x-rincon-queue:{lead}#0"
+            loaded = self._media_of(lead)
+            if loaded is None or loaded == queue:
+                return False
+            index = position or _first_track(result) or await self._position_of(lead, uri)
+            party.own_source = None
+            party.seen = False
+            party.state = "playing"
+            self._save()
+            try:
+                await self._commands.set_source(lead, queue, "")
+                if index:
+                    await self._commands.seek_track(lead, index)
+                await self._commands.play(lead)
+            except Exception as exc:                  # noqa: BLE001 - the song is queued all the same
+                log.info("party %r: %s could not be switched to its queue: %s", party.name, lead, exc)
+            return True
+
+    async def _position_of(self, lead: str, uri: str) -> int | None:
+        """The 1-based place of ``uri``'s last copy in ``lead``'s queue."""
+        items = await self._read_queue(lead) or []
+        return next((i for i in range(len(items), 0, -1) if items[i - 1].get("uri") == uri), None)
 
     # -- who added what ------------------------------------------------------
 
