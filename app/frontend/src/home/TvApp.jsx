@@ -20,13 +20,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useI18n } from '../i18n/index.jsx'
 import { useSystem } from '../lib/store.jsx'
 import { withBase } from '../lib/base.js'
-import { mediaKeyOf, transportAnchor } from '../lib/videoSync.js'
+import { OFFSET_KEY, clampOffset, mediaKeyOf, transportAnchor } from '../lib/videoSync.js'
 import { useFollowLine, useLyrics, useLyricsLine } from '../lib/lyrics.js'
 import Art from '../components/Art.jsx'
 import { homeApi } from './api.js'
 import { useMe } from './useMe.js'
 import { currentVideo, partyNowPlaying, partyRooms, usePartyQueue } from './partyKit.jsx'
 import { pickMode, pickParty } from './tvParty.js'
+import { isLiveUri } from './visualFrames.js'
 import VideoWindow from './VideoWindow.jsx'
 import Visualizer from './Visualizer.jsx'
 import './tv.css'
@@ -253,6 +254,21 @@ function useAnchor(transport) {
   }, [transport?.rel_time, transport?.received_at, transport?.state, transport?.position_age]) // eslint-disable-line react-hooks/exhaustive-deps
 }
 
+/** The picture offset set with the video's slider on this device (a TV's
+ * own picture delay); the visualizer uses it too. */
+function useStoredOffset() {
+  const read = () => {
+    try { return clampOffset(window.localStorage.getItem(OFFSET_KEY) ?? 0) } catch { return 0 }
+  }
+  const [offset, setOffset] = useState(read)
+  useEffect(() => {
+    const onStorage = (event) => { if (event.key === OFFSET_KEY) setOffset(read()) }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
+  return offset
+}
+
 function Stage({ party, mode, lyricsOn, agreedByLink, onVideo }) {
   const { zones } = useSystem()
   const lead = zones[party.speakers?.[0]] || null
@@ -260,6 +276,8 @@ function Stage({ party, mode, lyricsOn, agreedByLink, onVideo }) {
   const anchor = useAnchor(transport)
   const queueState = usePartyQueue(mode === 'video' ? party : null)
   const trackUri = transport?.track_uri || ''
+  const liveSound = isLiveUri(trackUri)
+  const offset = useStoredOffset()
 
   const video = mode === 'video' ? currentVideo(transport, queueState.queue) : null
   const videoId = video?.video_id || ''
@@ -274,7 +292,8 @@ function Stage({ party, mode, lyricsOn, agreedByLink, onVideo }) {
     return (
       <div className="tv-visualizer">
         <TvVisualizer partyId={party.id} trackUri={trackUri} positionSeconds={anchor.positionSeconds}
-                    positionAt={anchor.epochAt} playing={anchor.playing} isRelayed={!!mediaKeyOf(trackUri)} />
+                    positionAt={anchor.epochAt} playing={anchor.playing}
+                    isRelayed={liveSound || !!mediaKeyOf(trackUri)} live={liveSound} offsetSeconds={offset} />
       </div>
     )
   }

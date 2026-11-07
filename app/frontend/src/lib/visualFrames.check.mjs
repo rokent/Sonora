@@ -2,8 +2,8 @@
 // The visualizer's frame queue (home/visualFrames.js) lives with the home
 // code; its check lives here, where test_js_checks.py runs every check.
 import {
-  FRAME_SAMPLES, LEVELS_SAMPLES, createFrameQueue, decodeFrame, pulse,
-  silence, speakerTime, syntheticWave, upsample,
+  FRAME_SAMPLES, LEVELS_SAMPLES, LIVE_DELAY_SECONDS, LIVE_QUEUE_MAX, createFrameQueue, decodeFrame,
+  frameTarget, isLiveUri, liveDelay, liveStamper, pulse, silence, speakerTime, syntheticWave, upsample,
 } from '../home/visualFrames.js'
 
 let bad = 0
@@ -71,6 +71,66 @@ q = createFrameQueue({ max: 5 })
 for (let i = 0; i < 9; i++) q.push(f(i))
 is(q.size, 5, 'the queue holds at most its cap, the oldest going first')
 is(q.take(4)?.t, 4, 'and the oldest kept is the fifth from last')
+
+// live sound: which tracks
+is(isLiveUri('x-rincon-mp3radio://10.0.0.2:8000/api/home/live/k3y_-1.mp3'), true, 'a live stream URI is live')
+is(isLiveUri('http://10.0.0.2:8000/api/home/live/abc.mp3?x=1'), true, 'with a query too')
+is(isLiveUri('http://10.0.0.2:8000/api/home/media/abcdefghijklmnop.m4a'), false, 'a YouTube relay is not live')
+is(isLiveUri('http://10.0.0.2:8000/api/home/live/'), false, 'the bare prefix is not a stream')
+is(isLiveUri(''), false, 'nothing is not live')
+
+// live sound: the delay
+is(LIVE_DELAY_SECONDS, 3, 'the live delay defaults to 3 s')
+is(liveDelay(), 3, 'no offset: the default delay')
+is(liveDelay(1), 2, 'a positive offset draws earlier')
+is(liveDelay(-2), 5, 'a negative one later')
+is(liveDelay(5), 0, 'never before the frame arrived')
+is(liveDelay('junk'), 3, 'a junk offset is no offset')
+is(LIVE_QUEUE_MAX >= (3 + 5) * 30, true, 'the live queue holds the longest delay')
+
+// live sound: target ignores the speaker
+near(frameTarget({ mode: 'live', speaker: { positionSeconds: 999, positionAt: 0, playing: true }, now: 10000 }),
+  7, 'live: arrival clock minus the delay, whatever the speaker says')
+near(frameTarget({ mode: 'live', offsetSeconds: 1, now: 10000 }), 8, 'live: the offset moves the delay')
+near(frameTarget({ mode: 'track', speaker: { positionSeconds: 20, positionAt: 0, playing: false }, offsetSeconds: 0.5, now: 10000 }),
+  20.5, 'track: speaker time plus the offset')
+
+// live sound: stamps by arrival, t ignored for matching
+let stamp = liveStamper()
+is(stamp(f(1234.5), 100).t, 100, 'a live frame is stamped with its arrival, not its own t')
+q = createFrameQueue({ max: LIVE_QUEUE_MAX })
+stamp = liveStamper()
+for (let i = 0; i < 30; i++) q.push(stamp(f(50 + i / 30, i), 10 + i / 30))
+is(q.take(frameTarget({ mode: 'live', now: 12900 })), null, 'nothing drawn before the delay has passed')
+got = q.take(frameTarget({ mode: 'live', now: 13000 + 10 * 1000 / 30 + 1 }))
+is(got && got.w[0], 10, 'the frame that arrived 3 s ago is drawn')
+got = q.take(frameTarget({ mode: 'live', offsetSeconds: -0.5, now: 13500 + 20 * 1000 / 30 + 1 }))
+is(got && got.w[0], 20, 'a negative offset draws the same frame half a second later')
+
+// live sound: a burst is spread by the frames' own spacing
+stamp = liveStamper()
+const burst = [0, 1, 2, 3].map((i) => stamp(f(7 + i / 30, i), 20))
+near(burst[3].t - burst[0].t, 0.1, 'four frames arriving together are spread over their 0.1 s')
+is(burst.every((fr, i) => i === 0 || fr.t > burst[i - 1].t), true, 'and stay in order')
+q = createFrameQueue({ max: LIVE_QUEUE_MAX })
+burst.forEach((fr) => q.push(fr))
+got = q.take(20 + 1.5 / 30)
+is(got && got.w[0], 1, 'so the second of the burst still gets its turn')
+
+// live sound: stamps never run backwards, and a far-ahead spread snaps back
+stamp = liveStamper()
+const a1 = stamp(f(0, 1), 5)
+const a2 = stamp(f(100, 2), 5.01)      // t jumped: not spread
+const a3 = stamp(f(0, 3), 5.02)        // t went back (the source restarted)
+is([a1.t, a2.t, a3.t], [5, 5.01, 5.02], 'jumps in t do not move the stamps')
+stamp = liveStamper()
+let s1 = null
+for (let i = 0; i < 60; i++) s1 = stamp(f(i * 0.03, i), 1)  // 60 frames in one instant: 1.8 s of sound
+is(s1.t >= 1 && s1.t <= 2, true, 'a burst is spread at most a second ahead of its arrival')
+q = createFrameQueue({ max: LIVE_QUEUE_MAX })
+stamp = liveStamper()
+for (let i = 0; i < 60; i++) q.push(stamp(f(i * 0.03, i), 1))
+is(q.size, 60, 'and no live frame is taken for a restart')
 
 // upsample, silence, synthetic
 const ramp = new Uint8Array(FRAME_SAMPLES).map((_, i) => i % 256)

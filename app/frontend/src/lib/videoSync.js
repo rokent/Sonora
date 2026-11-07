@@ -13,8 +13,10 @@ export const OFFSET_MAX = 5
 export const OFFSET_STEP = 0.25
 export const OFFSET_KEY = 'sonora.videoOffset'
 
-/** Our relay URL for a YouTube item, as the speaker reports it: its key. */
-const MEDIA_URI = /\/api\/home\/media\/([A-Za-z0-9_-]{16,64})\.m4a(?:$|[?#])/
+/** Our relay URL for a YouTube item, as the speaker reports it: its key.
+ * The item is .m4a, or .aac with SONORA_YOUTUBE_FORMAT=aac (backend
+ * home/media.py). */
+const MEDIA_URI = /\/api\/home\/media\/([A-Za-z0-9_-]{16,64})\.(?:m4a|aac)(?:$|[?#])/
 export function mediaKeyOf(uri) {
   const m = MEDIA_URI.exec(uri || '')
   return m ? m[1] : null

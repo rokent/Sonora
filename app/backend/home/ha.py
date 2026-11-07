@@ -125,7 +125,9 @@ async def ha_state(request: Request):
         parties = engine().list()
     except Refused as exc:
         return _answer(exc)
+    from . import tvs  # lazy, as routes does
     return {"presets": [{"id": p["id"], "name": p["name"]} for p in presets().list()],
+            "tvs": [{"id": t["id"], "name": t["name"]} for t in tvs.store().list()],
             "parties": [{"id": p["id"], "name": p["name"],
                          "state": "playing" if p["speakers"] else "ended",
                          "speakers": [routes._room(z) for z in p["speakers"]],
@@ -162,13 +164,21 @@ class TvBody(BaseModel):
 
 @router.post("/api/ha/parties/{party_id}/tv/{tv_id}")
 async def ha_tv(request: Request, party_id: str, tv_id: str, body: TvBody | None = None):
-    """Show a party on a TV, in the given mode or the TV's default."""
-    from . import tv_routes, tvs  # tv_routes imports routes, as this module does
+    """Show a party on a TV, in the given mode or the TV's default.
+
+    Answers at once, well inside Home Assistant's 10 s ``rest_command``
+    timeout: an unknown party or TV, or a bad mode, is refused here; otherwise
+    ``{"tv": "pending"}`` and the show (waking the TV can take ~20 s) runs in
+    the background, its outcome broadcast to Sonora as ``tv_result``."""
+    from . import tvs  # lazy, as routes does
 
     request_principal(request)
     try:
-        return await tv_routes.show_party(tv_id, party_id, body.mode if body else None)
+        if engine().get(party_id) is None:
+            raise Refused(404, "not_found", message=party_id)
+        mode = routes.queue_tv_show(tv_id, body.mode if body else None, party_id)
     except Refused as exc:
         return _answer(exc)
     except tvs.TvError as exc:
         return JSONResponse(exc.body, status_code=exc.status)
+    return {"tv": "pending", "tv_id": tv_id, "party_id": party_id, "mode": mode}

@@ -74,6 +74,7 @@ async def test_state_lists_presets_and_parties_with_track(rig):
     t = (await _token())["token"]
     s = (await call(t, "GET", "/api/ha/state")).json()
     assert s["presets"] == [{"id": preset["id"], "name": "Evening"}]
+    assert s["tvs"] == []
     assert len(s["parties"]) == 1
     p = s["parties"][0]
     assert p["name"] == "Dinner" and p["state"] == "playing" and p["speakers"] == ["Room A", "Room B"]

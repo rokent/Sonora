@@ -1428,6 +1428,8 @@ export default {
   'home.tv.needsPairing': 'The TV needs to be paired. Press Pair and allow it on the TV.',
   'home.tv.failed': 'Showing on the TV failed. Try again.',
   'home.tv.resultOk': 'The TV is showing the party.',
+  'home.tv.idLabel': 'ID for Home Assistant:',
+  'home.tv.idHelp': 'Tap to select it, then copy.',
   'home.preset.tv': 'TV',
   'home.preset.noTv': 'No TV',
   'home.display.title': 'Display links',

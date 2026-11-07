@@ -429,26 +429,59 @@ async def test_probe_failure_falls_back_uncached(rig, tv, monkeypatch):
 # -- Home Assistant and presets ----------------------------------------------
 
 
-async def test_ha_route_shows_with_service_token(rig, tv):
+async def test_ha_route_shows_in_background(rig, tv):
     made = await _add({"name": "TV", "host": "127.0.0.1", "mode_default": "video"})
     party = await _party()
     t = (await _token())["token"]
     r = await call(t, "POST", f"/api/ha/parties/{party['id']}/tv/{made['id']}")
     assert r.status == 200, r.body
-    assert r.json()["mode"] == "video"
+    assert r.json() == {"tv": "pending", "tv_id": made["id"], "party_id": party["id"], "mode": "video"}
     r = await call(t, "POST", f"/api/ha/parties/{party['id']}/tv/{made['id']}", {"mode": "cover"})
     assert r.status == 200 and r.json()["mode"] == "cover"
+    await _settle()
     await asyncio.sleep(0.05)
     assert len(tv.received) == 2
-    assert (await call(t, "POST", f"/api/ha/parties/{party['id']}/tv/nope")).status == 404
+    assert [m["ok"] for m in _results(rig)] == [True, True]
 
 
-async def test_ha_route_unreachable_is_504(rig, black_hole):
+async def test_ha_route_refuses_at_once(rig, fast):
     made = await _add()
     party = await _party()
     t = (await _token())["token"]
+    r = await call(t, "POST", f"/api/ha/parties/{party['id']}/tv/nope")
+    assert r.status == 404 and r.json()["error"] == "not_found"
+    r = await call(t, "POST", f"/api/ha/parties/nope/tv/{made['id']}")
+    assert r.status == 404
+    r = await call(t, "POST", f"/api/ha/parties/{party['id']}/tv/{made['id']}", {"mode": "disco"})
+    assert r.status == 400 and r.json()["error"] == "invalid"
+    assert not routes._tv_tasks and _results(rig) == []
+
+
+async def test_ha_route_does_not_wait_for_unreachable_tv(rig, black_hole):
+    made = await _add()
+    party = await _party()
+    t = (await _token())["token"]
+    began = time.monotonic()
     r = await call(t, "POST", f"/api/ha/parties/{party['id']}/tv/{made['id']}")
-    assert r.status == 504 and r.json()["error"] == "tv_unreachable"
+    assert time.monotonic() - began < 0.3      # the TV timeout is 0.5 s
+    assert r.status == 200 and r.json()["tv"] == "pending"
+    await _settle()
+    assert _results(rig) == [{"type": "tv_result", "party": party["id"], "tv_id": made["id"],
+                              "ok": False, "error": "tv_unreachable"}]
+
+
+async def test_preset_start_survives_a_failing_prepare(rig, fast, monkeypatch):
+    made = await _add()
+    preset = await _preset(made["id"])
+
+    def broken(tv_id, mode):
+        raise OSError("disk gone")
+    monkeypatch.setattr(tvs, "prepare", broken)
+    r = await client(USER).request("POST", f"/api/presets/{preset['id']}/start")
+    assert r.status == 200, r.body
+    party = r.json()
+    assert party["tv_error"] == "tv_failed" and party["speakers"] == ["A", "B"]
+    assert not routes._tv_tasks
 
 
 async def _preset(tv_id, show="visualizer"):
@@ -520,3 +553,10 @@ async def test_ha_preset_start_reports_missing_tv_at_once(rig, fast):
     assert r.status == 200, r.body
     assert r.json()["tv_error"] == "not_found" and "tv" not in r.json()
     assert not routes._tv_tasks
+
+
+async def test_ha_state_lists_tvs_without_secrets(rig, fast):
+    made = await _add({"name": "Living room", "host": "127.0.0.1", "mac": "aa:bb:cc:dd:ee:ff"})
+    t = (await _token())["token"]
+    s = (await call(t, "GET", "/api/ha/state")).json()
+    assert s["tvs"] == [{"id": made["id"], "name": "Living room"}]

@@ -43,7 +43,7 @@ sensor:
       Authorization: !secret sonora_token_header
     scan_interval: 10
     value_template: "{{ value_json.parties | length }}"
-    json_attributes: [presets, parties]
+    json_attributes: [presets, parties, tvs]
 
 template:
   - sensor:
@@ -80,9 +80,10 @@ To end the running party: `service: rest_command.sonora_end_party` with
 
 | Call | Result |
 | --- | --- |
-| `GET /api/ha/state` | `{presets:[{id,name}], parties:[{id,name,state,speakers,track:{title,artist,album,art}}]}` |
-| `POST /api/ha/presets/{id}/start` | starts the party, taking its speakers |
+| `GET /api/ha/state` | `{presets:[{id,name}], tvs:[{id,name}], parties:[{id,name,state,speakers,track:{title,artist,album,art}}]}` |
+| `POST /api/ha/presets/{id}/start` | starts the party, taking its speakers; a preset with a TV adds `tv: "pending"` (or `tv_error`) |
 | `POST /api/ha/parties/{id}/end` | ends it |
+| `POST /api/ha/parties/{id}/tv/{tv_id}` | `{tv: "pending", tv_id, party_id, mode}` at once; the TV is woken and shown the party in the background (see [tv-mode.md](tv-mode.md)) |
 
 Errors are JSON `{error}`: 401 bad token, 404 `not_found`, 409 `no_speakers`,
 503 `parties_unavailable`.

@@ -60,6 +60,8 @@ def install(app: FastAPI) -> None:
     before ``routes.attribution``, which credits queue additions to it). Its routers are included before
     any of ``main.py``'s routes, so ``/join`` wins over ``/{filename}``.
     """
+    from . import logredact  # display/guest tokens out of the access log
+    logredact.install()
     # Registered before the guard so it runs after it, with the principal known.
     app.middleware("http")(routes.attribution)
     app.middleware("http")(permissions.guard)

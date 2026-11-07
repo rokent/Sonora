@@ -19,18 +19,22 @@ export default function TvSettings() {
     .catch((exc) => { setTvs([]); setError(errorText(t, exc)) }), [t])
   useEffect(() => { load() }, [load])
 
+  /** Run one action; true when it worked. */
   async function run(key, call, done) {
     setBusy(key)
     setError('')
     setInfo('')
+    let ok = false
     try {
       await call()
       if (done) setInfo(done)
+      ok = true
     } catch (exc) {
       setError(errorText(t, exc))
     }
     setBusy('')
     load()
+    return ok
   }
 
   // A test needs something to show: the first running party.
@@ -45,8 +49,8 @@ export default function TvSettings() {
     event.preventDefault()
     if (!form.name.trim() || !form.host.trim() || busy) return
     const body = { name: form.name.trim(), host: form.host.trim(), ...(form.mac.trim() ? { mac: form.mac.trim() } : {}) }
-    await run('add', () => homeApi.addTv(body))
-    setForm({ name: '', host: '', mac: '' })
+    // A refused TV (a bad address) keeps what was typed, to be corrected.
+    if (await run('add', () => homeApi.addTv(body))) setForm({ name: '', host: '', mac: '' })
   }
 
   const field = (key) => ({ value: form[key], onChange: (e) => setForm((prev) => ({ ...prev, [key]: e.target.value })) })
@@ -62,6 +66,9 @@ export default function TvSettings() {
             <div className="hp-party__name">{tv.name}</div>
             <div className="hp-muted hp-small">
               {tv.host}{tv.mac ? ` · ${tv.mac}` : ''} · {tv.paired ? t('home.tv.paired') : t('home.tv.notPaired')}
+            </div>
+            <div className="hp-muted hp-small">
+              {t('home.tv.idLabel')} <code className="hp-copyable" title={t('home.tv.idHelp')}>{tv.id}</code>
             </div>
             {!tv.paired && <p className="hp-muted hp-small">{t('home.tv.pairHelp')}</p>}
             <div className="hp-actions hp-actions--row">
