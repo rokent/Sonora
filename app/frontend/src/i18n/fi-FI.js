@@ -1397,4 +1397,10 @@ export default {
   's2.colBuy': 'Toiminto',
   's2.buyNow': 'Osta nyt',
   's2.updateNow': 'Päivitä nyt',
+  'home.join.title': 'Join the party',
+  'home.join.name': 'Your first name',
+  'home.join.go': 'Join',
+  'home.join.bad': 'This invite link is no longer valid. Ask the host for a new one.',
+  'home.parties.button': 'Parties',
+  'home.parties.title': 'Parties',
 }

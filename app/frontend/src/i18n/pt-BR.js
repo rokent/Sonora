@@ -1396,4 +1396,10 @@ export default {
   's2.colBuy': 'Ação',
   's2.buyNow': 'Comprar',
   's2.updateNow': 'Atualizar agora',
+  'home.join.title': 'Join the party',
+  'home.join.name': 'Your first name',
+  'home.join.go': 'Join',
+  'home.join.bad': 'This invite link is no longer valid. Ask the host for a new one.',
+  'home.parties.button': 'Parties',
+  'home.parties.title': 'Parties',
 }

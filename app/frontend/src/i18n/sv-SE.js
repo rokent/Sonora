@@ -1387,4 +1387,10 @@ export default {
   's2.colBuy': 'Åtgärd',
   's2.buyNow': 'Köp nu',
   's2.updateNow': 'Uppdatera nu',
+  'home.join.title': 'Join the party',
+  'home.join.name': 'Your first name',
+  'home.join.go': 'Join',
+  'home.join.bad': 'This invite link is no longer valid. Ask the host for a new one.',
+  'home.parties.button': 'Parties',
+  'home.parties.title': 'Parties',
 }

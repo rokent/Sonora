@@ -1,0 +1,27 @@
+.home-heading { margin: 0; padding: 16px; color: var(--t-fg, #111); font-size: 1.5rem; }
+
+.home-join {
+  min-height: 100vh; box-sizing: border-box; padding: 16px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--t-bg, #f6f6f7); color: var(--t-fg, #111);
+}
+.home-join__card { width: 100%; max-width: 360px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; }
+.home-join__title { margin: 0 0 4px; font-size: 1.5rem; }
+.home-join__label { font-size: 0.9rem; opacity: 0.8; }
+.home-join__input {
+  box-sizing: border-box; width: 100%; padding: 12px; font: inherit; font-size: 16px;
+  color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 8px;
+}
+.home-join__bad { margin: 0; font-size: 0.9rem; color: var(--t-danger, #b00020); }
+.home-join__go {
+  padding: 12px; font: inherit; font-weight: 600; cursor: pointer; border: 0; border-radius: 8px;
+  color: var(--t-bg, #f6f6f7); background: var(--t-fg, #111);
+}
+.home-join__go:disabled { opacity: 0.5; cursor: default; }
+
+.home-parties-button {
+  position: fixed; left: 16px; bottom: 16px; z-index: 2147483000;
+  padding: 10px 16px; border-radius: 999px; text-decoration: none; font: inherit; font-weight: 600;
+  color: var(--t-fg, #111); background: var(--t-bg, #f6f6f7); border: 1px solid currentColor;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
