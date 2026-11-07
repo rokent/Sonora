@@ -157,6 +157,8 @@ class PartyEngine:
         #: topology events Sonora's own regrouping brings are not read as
         #: another app's doing.
         self._lock = asyncio.Lock()
+        #: Called with a party's id as it ends, before its speakers are let go.
+        self._end_listeners: list[Callable[[str], Awaitable[None]]] = []
         self._load()
 
     # -- persistence -----------------------------------------------------------
@@ -404,12 +406,23 @@ class PartyEngine:
             self._save()
         return {**asdict(party), "report": {k: report.get(k) for k in ("set", "missing", "failed")}}
 
+    def on_end(self, listener: Callable[[str], Awaitable[None]]) -> None:
+        """Call ``listener(party_id)`` whenever a party ends, before its
+        speakers are released (live sound stops first). It runs while the
+        engine is changing, so it must not call back into the engine."""
+        self._end_listeners.append(listener)
+
     async def end(self, party_id: str) -> dict:
         """End the party: each speaker rejoins the party it was taken from if
         that one is still going, else goes back to how it was before any
         party. The party and its attribution are forgotten."""
         async with self._lock:
             party = self._party(party_id)
+            for listener in list(self._end_listeners):
+                try:
+                    await listener(party_id)
+                except Exception:
+                    log.exception("parties: an end listener failed for %s", party_id)
             plans = {zone: self._leave_plan(zone, party_id) for zone in party.speakers}
             for zone in list(self._stacks):
                 self._drop_entries(zone, party_id)

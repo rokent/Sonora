@@ -26,7 +26,7 @@ from . import youtube
 from .store import home_dir, read_json, write_json
 from .youtube import Video
 
-__all__ = ["MEDIA_URI", "MediaKeys", "keys", "media_url", "didl_for", "router"]
+__all__ = ["MEDIA_URI", "MediaKeys", "keys", "media_url", "speaker_base", "didl_for", "router"]
 
 router = APIRouter()
 
@@ -103,16 +103,22 @@ def keys() -> MediaKeys:
     return _keys
 
 
-def media_url(key: str, host_for: str) -> str:
-    """The URL a speaker fetches: the address speakers already reach us on
-    (the event callback address), else the route toward ``host_for``."""
+def speaker_base(host_for: str) -> str:
+    """``http://<ip>:<port>`` as a speaker reaches us: the address speakers
+    already reach us on (the event callback address), else the route toward
+    ``host_for``."""
     from .. import main  # lazy: main imports home
 
     controller = main.state.get("controller")
     ip = getattr(getattr(controller, "events", None), "_callback_ip", None)
     if not ip:
         ip = events.local_ip_for(host_for)
-    return f"http://{ip}:{settings.port}/api/home/media/{key}.m4a"
+    return f"http://{ip}:{settings.port}"
+
+
+def media_url(key: str, host_for: str) -> str:
+    """The URL a speaker fetches for a media key."""
+    return f"{speaker_base(host_for)}/api/home/media/{key}.m4a"
 
 
 def _x(text: str) -> str:
