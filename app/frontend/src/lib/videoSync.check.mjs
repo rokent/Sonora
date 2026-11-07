@@ -11,6 +11,10 @@ const is = (got, want, why) => {
 }
 
 is(mediaKeyOf('http://10.0.0.5:8000/api/home/media/abcdefghijklmnopQRST_-12.m4a'), 'abcdefghijklmnopQRST_-12', 'a relay URL gives its key')
+is(mediaKeyOf('http://10.0.0.5:8000/api/home/media/abcdefghijklmnopQRST_-12.aac'), 'abcdefghijklmnopQRST_-12', 'an .aac relay URL gives its key')
+is(mediaKeyOf('http://10.0.0.5:8000/api/home/media/abcdefghijklmnopQRST_-12.aac?x=1'), 'abcdefghijklmnopQRST_-12', 'an .aac relay URL with a query gives its key')
+is(mediaKeyOf('http://10.0.0.5:8000/api/home/media/abcdefghijklmnopQRST_-12.mp3'), null, 'another extension is not ours')
+is(mediaKeyOf('http://10.0.0.5:8000/api/home/media/abcdefghijklmnopQRST_-12.aacx'), null, 'nor is a longer one')
 is(mediaKeyOf('x-sonos-spotify:spotify%3atrack%3a1'), null, 'a Spotify track is not ours')
 is(mediaKeyOf('http://h/api/home/media/short.m4a'), null, 'a too-short key is not ours')
 
