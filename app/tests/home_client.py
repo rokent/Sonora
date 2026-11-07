@@ -21,15 +21,22 @@ class Client:
             hdrs.append((b"cookie", jar.encode()))
         return hdrs
 
-    async def request(self, method, path, body=None, headers=None):
+    async def request(self, method, path, body=None, headers=None, raw=None):
+        """``raw`` (bytes, or a list of chunks) replaces the JSON body."""
         path, _, query = path.partition("?")
-        raw = json.dumps(body).encode() if body is not None else b""
+        chunks = ([raw] if isinstance(raw, bytes) else list(raw)) if raw is not None else None
+        payload = (b"".join(chunks) if chunks is not None
+                   else json.dumps(body).encode() if body is not None else b"")
         hdrs = self._headers(headers, [(b"content-type", b"application/json")])
         scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
                  "method": method, "scheme": self.scheme, "path": path,
                  "raw_path": path.encode(), "query_string": query.encode(),
                  "headers": hdrs, "server": (self.host, 80), "client": ("1.2.3.4", 1)}
-        sent = [{"type": "http.request", "body": raw, "more_body": False}]
+        if chunks is None:
+            sent = [{"type": "http.request", "body": payload, "more_body": False}]
+        else:
+            sent = [{"type": "http.request", "body": c, "more_body": True} for c in chunks]
+            sent.append({"type": "http.request", "body": b"", "more_body": False})
         out = {"status": 0, "headers": [], "body": b""}
 
         async def receive():

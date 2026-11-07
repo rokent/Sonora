@@ -29,6 +29,7 @@ change, so a restart of Sonora keeps every way back.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -156,6 +157,8 @@ class PartyEngine:
         self._stacks: dict[str, list[dict]] = {}
         #: ``{party: {uri: [{"id", "name"}, ...]}}``, oldest adder first.
         self._added: dict[str, dict[str, list[dict]]] = {}
+        #: Called with the party id after a party has ended and been removed.
+        self._end_listeners: list[Callable[[str], Awaitable[None] | None]] = []
         #: Held while a party changes, so changes run one at a time and the
         #: topology events Sonora's own regrouping brings are not read as
         #: another app's doing.
@@ -407,6 +410,10 @@ class PartyEngine:
             self._save()
         return {**asdict(party), "report": {k: report.get(k) for k in ("set", "missing", "failed")}}
 
+    def on_end(self, callback: Callable[[str], Awaitable[None] | None]) -> None:
+        """Call ``callback(party_id)`` after a party has ended and been removed."""
+        self._end_listeners.append(callback)
+
     async def end(self, party_id: str) -> dict:
         """End the party: each speaker rejoins the party it was taken from if
         that one is still going, else goes back to how it was before any
@@ -421,6 +428,13 @@ class PartyEngine:
             self._save()
             report = await self._release(plans)
             self._save()
+        for callback in list(self._end_listeners):
+            try:
+                result = callback(party_id)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                log.exception("parties: an on_end listener failed for %s", party_id)
         return {"id": party_id, "name": party.name, **report}
 
     async def add_speaker(self, party_id: str, zone: str, by: Actor, take: bool = False) -> dict:

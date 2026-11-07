@@ -87,6 +87,7 @@ EXPECTED_GUEST_WRITES = {
     ("POST", "/api/parties/{party_id}/join"),
     ("POST", "/api/parties/{party_id}/queue"),
     ("POST", "/api/parties/{party_id}/youtube"),
+    ("POST", "/api/parties/{party_id}/files"),
     ("DELETE", "/api/parties/{party_id}/queue/{index}"),
     ("POST", "/api/parties/{party_id}/volume"),
 }
@@ -107,6 +108,7 @@ EXPECTED_GUEST_READS = {
     ("GET", "/api/art"),
     ("GET", "/api/stream/audio/{key}"),
     ("GET", "/api/home/media/{key}.m4a"),          # public: speakers
+    ("GET", "/api/home/files/{name}"),             # public: speakers
     ("GET", "/api/state"),
     ("GET", "/api/home/config"),
     ("GET", "/api/favorites"),
@@ -169,6 +171,7 @@ EXPECTED_DISPLAY_REACHABLE = {
     ("GET", "/api/art"),
     ("GET", "/api/stream/audio/{key}"),
     ("GET", "/api/home/media/{key}.m4a"),
+    ("GET", "/api/home/files/{name}"),
     # DISPLAY
     ("GET", "/api/state"),
     ("GET", "/api/home/config"),

@@ -26,7 +26,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import media, youtube
+from . import files, media, youtube
 from .auth import Principal, request_principal
 from .parties import MixedHousehold, NoSpeakers, PartyEngine, SpeakerTaken
 from .presets import Presets
@@ -97,6 +97,11 @@ def engine() -> PartyEngine:
             raise Refused(503, "parties_unavailable") from None
         _held.pop("failed", None)
         controller.on_state(found.on_state)
+        found.on_end(lambda party_id: files.delete_party(party_id))
+        try:
+            files.cleanup(p["id"] for p in found.list())
+        except OSError:
+            log.exception("files: startup cleanup failed")
         _held["engine"] = held = (controller, path, found)
         _members.clear()
     return held[2]
@@ -477,6 +482,45 @@ async def add_youtube_to_party_queue(request: Request, party_id: str, body: YouT
         engine().record_add(party_id, uri, who)
     await changed()
     return {"ok": True, "item": _brief(video)}
+
+
+@router.post("/api/parties/{party_id}/files")
+async def add_file_to_party_queue(request: Request, party_id: str, name: str = "",
+                                  next: bool = False):
+    """Drop a music file into the party: the request body is the file's bytes
+    (``?name=<file name>`` gives its extension and, without tags, its title)."""
+    who = request_principal(request)
+    try:
+        lead = _lead(_party(party_id, who))
+    except Refused as exc:
+        return _answer(exc)
+    if next and who.is_guest:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    if files.extension_of(name) is None:
+        return JSONResponse({"error": "unsupported_type"}, status_code=415)
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > files.MAX_BYTES:
+        return JSONResponse({"error": "too_large"}, status_code=413)
+    try:
+        stored = await files.store_stream(party_id, name, request.stream())
+    except files.FileError as exc:
+        return JSONResponse({"error": exc.error}, status_code=exc.status)
+    try:
+        host = _main().state["controller"].coordinator_of(lead).host
+        uri = media.base_url(host) + files.file_uri_path(stored)
+        metadata = files.didl_for(stored, uri)
+        async with _queue_lock:
+            await _main().state["commands"].add_to_queue(lead, uri, metadata, next_=next)
+            engine().record_add(party_id, uri, who)
+    except BaseException:
+        stored.path.unlink(missing_ok=True)
+        raise
+    await changed()
+    return {"ok": True, "item": {"title": stored.title, "artist": stored.artist,
+                                 "size": stored.size, "type": stored.ext}}
 
 
 @router.post("/api/parties/{party_id}/queue")
