@@ -54,3 +54,9 @@ def test_user_gets_full_control_url_guest_gets_view_url(monkeypatch):
 def test_guest_without_view_url_gets_null(monkeypatch):
     monkeypatch.setenv("SONORA_NEKO_URL", "https://neko.test/?pwd=admin")
     assert body(get(Principal("guest", "g", "Bo"))) == {"remote_browser": None}
+
+
+def test_service_principal_gets_null(monkeypatch):
+    monkeypatch.setenv("SONORA_NEKO_URL", "https://neko.test/?pwd=admin")
+    monkeypatch.setenv("SONORA_NEKO_VIEW_URL", "https://neko.test/?pwd=view")
+    assert body(get(Principal("service", "ha", "Home Assistant"))) == {"remote_browser": None}

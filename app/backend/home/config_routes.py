@@ -23,5 +23,10 @@ def _env(name: str) -> str | None:
 @router.get("/api/home/config")
 async def home_config(request: Request) -> dict:
     principal = request_principal(request)
-    url = _env("SONORA_NEKO_VIEW_URL") if principal.is_guest else _env("SONORA_NEKO_URL")
+    # Fail closed: only a household member gets the full-control link.
+    url = None
+    if principal.kind == "user":
+        url = _env("SONORA_NEKO_URL")
+    elif principal.kind == "guest":
+        url = _env("SONORA_NEKO_VIEW_URL")
     return {"remote_browser": {"url": url} if url else None}

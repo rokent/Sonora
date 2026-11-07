@@ -19,8 +19,8 @@ services:
       # SONORA_TRUST_PROXY: 1
       # Optional shared browser (see docs/remote-browser.md): full control for
       # household members, watch-only for guests.
-      # SONORA_NEKO_URL: http://sonora.local:8080/?usr=admin&pwd=change-me-admin
-      # SONORA_NEKO_VIEW_URL: http://sonora.local:8080/?usr=guest&pwd=change-me-view
+      # SONORA_NEKO_URL: http://sonora.local:8080/?usr=host&pwd=change-me-admin
+      # SONORA_NEKO_VIEW_URL: http://sonora.local:8080/?usr=guest&pwd=change-me-user
     volumes:
       - ./sonora-data:/data
 

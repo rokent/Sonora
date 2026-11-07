@@ -23,6 +23,9 @@ RUN python -m venv /venv \
  && /venv/bin/pip install --require-hashes -r requirements.lock \
  && /venv/bin/pip install --no-deps .
 
+# ---- node binary for the target platform (web runs on the build platform) --
+FROM node:26-slim AS noderuntime
+
 # ---- runtime --------------------------------------------------------------
 FROM python:3.14-slim AS runtime
 LABEL org.opencontainers.image.title="Sonora" \
@@ -38,7 +41,7 @@ RUN useradd --system --uid 10001 --create-home --home-dir /home/sonora sonora \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libatomic1 \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=web /usr/local/bin/node /usr/local/bin/node
+COPY --from=noderuntime /usr/local/bin/node /usr/local/bin/node
 
 COPY --from=deps /venv /venv
 COPY --from=deps /src/backend /app/backend

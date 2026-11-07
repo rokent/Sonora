@@ -58,4 +58,6 @@ Save as `neko-policies.json` (mounted above):
 }
 ```
 
+If playback or thumbnails fail, YouTube may also need `*.ytimg.com`, `*.ggpht.com`, `*.googleusercontent.com` and `*.gstatic.com` in the allowlist.
+
 The allowlist wins over the blocklist, so only those hosts load.
