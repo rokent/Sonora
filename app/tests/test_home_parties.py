@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.home import parties
-from backend.home.parties import MixedHousehold, PartyEngine, SpeakerTaken
+from backend.home.parties import MixedHousehold, NoSpeakers, PartyEngine, SpeakerTaken
 from backend.sonos import scenes
 
 
@@ -60,10 +60,26 @@ class _Commands:
     def __init__(self, controller: _Controller) -> None:
         self.c = controller
         self.calls: list[tuple] = []
+        #: When set, a join is heard back from the speakers only this many
+        #: seconds later, with a stale topology event halfway there.
+        self.late: float | None = None
+
+    def _fire(self):
+        for cb in self.c.callbacks:
+            asyncio.ensure_future(cb({"type": "snapshot"}))
 
     async def join(self, zone, coordinator):
         self.calls.append(("join", zone, coordinator))
-        self.c.lead[zone] = coordinator
+        if self.late is None:
+            self.c.lead[zone] = coordinator
+            return
+        loop = asyncio.get_running_loop()
+        loop.call_later(self.late / 2, self._fire)
+
+        def heard():
+            self.c.lead[zone] = coordinator
+            self._fire()
+        loop.call_later(self.late, heard)
 
     async def delegate(self, coordinator, heir):
         self.calls.append(("delegate", coordinator, heir))
@@ -278,3 +294,187 @@ def test_mixed_household_rejected(rig):
     with pytest.raises(MixedHousehold):
         run(engine.start(name="Both", speakers=["A", "X"], by=ANA))
     assert rig.applied == [] and engine.list() == []
+
+
+def test_lead_moved_away_lets_the_lead_go(rig):
+    engine = rig.engine()
+    party = run(engine.start(name="One", speakers=["A", "B", "C"], by=ANA))
+    # Another app took A out; the speakers handed the group to B.
+    rig.controller.lead.update({"A": "A", "B": "B", "C": "B"})
+    run(engine.on_state({"type": "snapshot"}))
+    assert rig.notices == [{"type": "party_notice", "party": party["id"], "zone": "A", "event": "left"}]
+    assert engine.list()[0]["speakers"] == ["B", "C"] and engine.owner_of("A") is None
+    assert rig.engine().list()[0]["speakers"] == ["B", "C"]
+
+
+def test_late_topology_does_not_drop_a_speaker_just_placed(rig):
+    engine = rig.engine()
+    rig.controller.on_state(engine.on_state)
+    party = run(engine.start(name="One", speakers=["A"], by=ANA))
+    rig.commands.late = 0.2
+
+    async def go():
+        await engine.add_speaker(party["id"], "C", ANA)
+        await asyncio.sleep(0.3)
+    run(go())
+    assert rig.notices == []
+    assert engine.owner_of("C") == party["id"] and engine.list()[0]["speakers"] == ["A", "C"]
+    # The way back is still there.
+    run(engine.remove_speaker(party["id"], "C"))
+    assert rig.reverted[-1]["rooms"]["C"]["marker"] == "C@2"
+
+
+def test_changes_run_one_at_a_time(rig, monkeypatch):
+    fake = scenes.apply
+
+    async def slow(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        return await fake(*args, **kwargs)
+    engine = rig.engine()
+    other = run(engine.start(name="Other", speakers=["B", "C"], by=ANA))
+    monkeypatch.setattr(scenes, "apply", slow)
+
+    async def go():
+        first = asyncio.ensure_future(engine.start(name="One", speakers=["A"], by=ANA))
+        second = asyncio.ensure_future(engine.start(name="Two", speakers=["A"], by=ANA))
+        await asyncio.sleep(0.01)
+        # Read while a change holds the engine: not acted on.
+        rig.controller.lead["C"] = "C"
+        await engine.on_state({"type": "snapshot"})
+        assert rig.notices == []
+        return await asyncio.gather(first, second, return_exceptions=True)
+    results = run(go())
+    assert sum(isinstance(r, SpeakerTaken) for r in results) == 1
+    assert sum(isinstance(r, dict) for r in results) == 1
+    assert len([p for p in engine.list() if "A" in p["speakers"]]) == 1
+    run(engine.on_state({"type": "snapshot"}))
+    assert rig.notices == [{"type": "party_notice", "party": other["id"], "zone": "C", "event": "left"}]
+
+
+def test_start_checks_the_scene_before_touching_other_parties(rig):
+    engine = rig.engine()
+    run(engine.start(name="One", speakers=["A", "B"], by=ANA))
+    rig.commands.calls.clear()
+    with pytest.raises(ValueError):
+        run(engine.start(name="  ", speakers=["A"], by=ANA, take=True))
+    assert rig.commands.calls == [] and engine.list()[0]["speakers"] == ["A", "B"]
+
+
+def test_no_way_back_refuses_the_party(rig, monkeypatch):
+    engine = rig.engine()
+    party = run(engine.start(name="One", speakers=["B"], by=ANA))
+    rig.controller.zones["C"].online = False
+    with pytest.raises(NoSpeakers):
+        run(engine.add_speaker(party["id"], "C", ANA))
+    rig.controller.zones["A"].online = False
+    with pytest.raises(NoSpeakers):
+        run(engine.start(name="Off", speakers=["A", "C"], by=ANA))
+    assert len(rig.applied) == 1
+    rig.controller.zones["A"].online = True
+
+    async def no_record(ctrl, cmds, scene, metadata_for=None):
+        return {"name": scene["name"], "set": [], "missing": [], "failed": [], "before": None}
+    monkeypatch.setattr(scenes, "apply", no_record)
+    with pytest.raises(NoSpeakers):
+        run(engine.start(name="Blind", speakers=["A"], by=ANA))
+    assert [p["name"] for p in engine.list()] == ["One"] and engine.owner_of("A") is None
+
+
+# -- the queue the party found, through the real scene machinery --------------
+
+
+class _Transport(SimpleNamespace):
+    is_home_theater = False
+
+    @property
+    def source(self):
+        return "queue" if self.media_uri.startswith("x-rincon-queue:") else ""
+
+
+class _SceneController:
+    """Room A alone, playing its own queue at track 2."""
+
+    def __init__(self):
+        self.zones = {"A": SimpleNamespace(
+            uuid="A", name="Kitchen", host="10.0.0.1", online=True, muted=False, volume=20, bass=0, treble=0,
+            loudness=False, media_metadata="", model_number="S1",
+            transport=_Transport(media_uri="x-rincon-queue:A#0", track_uri="", state="PLAYING", play_mode="NORMAL",
+                                 container_title="", title="", album_art_uri="", track_number=2, rel_time="0:00:10"))}
+        group = SimpleNamespace(coordinator_uuid="A", zone_uuids=["A"])
+        self.home = SimpleNamespace(id="HH", groups={"GA": group}, group_for_zone=lambda u: group)
+        self.households = {"HH": self.home}
+
+    def zone(self, uuid):
+        return self.zones[uuid]
+
+    def coordinator_of(self, uuid):
+        return self.zones[uuid]
+
+    def household_of(self, uuid):
+        return self.home
+
+    def account_udn(self, household_id, sid, serial=""):
+        return ""
+
+
+class _SceneSoap:
+    def __init__(self, queue):
+        self.queue = list(queue)
+        self.calls = []
+
+    async def call(self, host, service, action, args=None, **kwargs):
+        self.calls.append((action, dict(args or {})))
+        values = {}
+        if action == "Browse":
+            start = args["StartingIndex"]
+            page = self.queue[start:start + args["RequestedCount"]]
+            values = {"Result": "".join(f'<item id="Q:0/{i}"><res protocolInfo="x">{u}</res></item>'
+                                        for i, u in enumerate(page, start + 1)),
+                      "TotalMatches": str(len(self.queue))}
+        return SimpleNamespace(get=lambda k, d="": values.get(k, d))
+
+
+class _SceneCommands:
+    def __init__(self, soap):
+        self.soap = soap
+        self.calls = []
+
+    def _queueable(self, uri):
+        return True
+
+    @staticmethod
+    def _has_speech_switch(state):
+        return False
+
+    async def sleep_timer_remaining(self, uuid):
+        return ""
+
+    def __getattr__(self, name):
+        async def call(*args, **kwargs):
+            self.calls.append((name, *args))
+        return call
+
+
+def test_end_puts_back_the_queue_the_party_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(scenes, "GROUP_SETTLE", 0)
+    controller = _SceneController()
+    soap = _SceneSoap(["x-file:1", "x-file:2"])
+    commands = _SceneCommands(soap)
+
+    async def notify(message):
+        pass
+    engine = PartyEngine(tmp_path / "parties.json", controller, commands, None, notify)
+    party = run(engine.start(name="One", speakers=["A"], by=ANA))
+    assert ("pause", "A") in commands.calls                # silence: the party starts quiet
+    # A guest fills the queue during the party.
+    engine.record_add(party["id"], "x-file:guest", GUEST)
+    soap.queue.append("x-file:guest")
+    commands.calls.clear()
+    soap.calls.clear()
+    run(engine.end(party["id"]))
+    assert ("clear_queue", "A") in commands.calls
+    adds = [args for action, args in soap.calls if action == "AddMultipleURIsToQueue"]
+    assert [a["EnqueuedURIs"] for a in adds] == ["x-file:1 x-file:2"]
+    assert ("set_source", "A", "x-rincon-queue:A#0", "") in commands.calls
+    seeks = [args for action, args in soap.calls if action == "Seek"]
+    assert seeks and seeks[0]["Target"] == 2

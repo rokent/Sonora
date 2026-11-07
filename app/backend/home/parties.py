@@ -28,11 +28,13 @@ change, so a restart of Sonora keeps every way back.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import secrets
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Protocol
@@ -68,6 +70,11 @@ class SpeakerTaken(Exception):
         self.zone = zone
         self.party_id = party_id
         self.party_name = party_name
+
+
+class NoSpeakers(Exception):
+    """None of the speakers asked for can be reached, or what they were could
+    not be written down: a party there would have no way back."""
 
 
 class MixedHousehold(Exception):
@@ -146,9 +153,10 @@ class PartyEngine:
         self._stacks: dict[str, list[dict]] = {}
         #: ``{party: {uri: [{"id", "name"}, ...]}}``, oldest adder first.
         self._added: dict[str, dict[str, list[dict]]] = {}
-        #: Set while Sonora itself regroups speakers, so the topology events
-        #: that regrouping brings are not read as another app's doing.
-        self._busy = 0
+        #: Held while a party changes, so changes run one at a time and the
+        #: topology events Sonora's own regrouping brings are not read as
+        #: another app's doing.
+        self._lock = asyncio.Lock()
         self._load()
 
     # -- persistence -----------------------------------------------------------
@@ -270,6 +278,34 @@ class PartyEngine:
 
     # -- regrouping ------------------------------------------------------------
 
+    async def _settle(self, expected: dict[str, str]) -> None:
+        """Wait, as the scene machinery does, until the speakers report the
+        regrouping just sent, so the lock is not let go while its topology
+        events are still on their way: one arriving late would otherwise read
+        as another app moving a speaker the engine has just placed."""
+        if expected:
+            await scenes._settle_groups(self._controller, expected)
+
+    def _online(self, zone: str) -> bool:
+        try:
+            return bool(self._controller.zone(zone).online)
+        except KeyError:
+            return False
+
+    async def _keep_queue(self, record: dict | None, lead: str) -> None:
+        """Write the party lead's own queue into its record when the scene
+        did not (``scenes.apply`` reads a queue only when it replaces it).
+        Guests fill the lead's queue during the party; ending it must hand
+        back the queue that was there, and ``revert`` restores a queue held
+        in the record even when the source is still that queue."""
+        room = ((record or {}).get("rooms") or {}).get(lead)
+        if room is None or room.get("queue") is not None:
+            return
+        try:
+            room["queue"] = await scenes._queue_items(self._commands, self._controller.zone(lead).host)
+        except Exception as exc:                      # noqa: BLE001 - the party starts all the same
+            log.info("party: the queue of %s could not be read: %s", lead, exc)
+
     async def _hand_over(self, party: Party, zone: str) -> None:
         """Before ``zone`` leaves ``party``, give the group's lead to the next
         speaker if ``zone`` leads it, so the rest carry on together instead
@@ -278,6 +314,7 @@ class PartyEngine:
             heir = party.speakers[1]
             try:
                 await self._commands.delegate(zone, heir)
+                await self._settle({**{u: heir for u in party.speakers if u != zone}, zone: zone})
             except Exception as exc:                  # noqa: BLE001 - the speaker moves all the same
                 log.info("party %r: handing the lead to %s failed: %s", party.name, heir, exc)
         if zone in party.speakers:
@@ -291,15 +328,18 @@ class PartyEngine:
         or one ``revert`` for every speaker going back to before any party."""
         report: dict = {"rejoined": [], "reverted": None}
         records = [r for kind, r in plans.values() if kind == "revert" and r]
+        expected: dict[str, str] = {}
         for zone, (kind, target) in plans.items():
             if kind != "join":
                 continue
             try:
                 await self._commands.join(zone, target.speakers[0])
+                expected[zone] = target.speakers[0]
             except Exception as exc:                  # noqa: BLE001 - it is counted in the party all the same
                 log.info("party %r: %s could not rejoin: %s", target.name, zone, exc)
             target.speakers.append(zone)
             report["rejoined"].append({"zone": zone, "party": target.id})
+        await self._settle(expected)
         if records:
             merged = {"name": records[0].get("name", ""),
                       "at": min((r.get("at") or time.time()) for r in records), "rooms": {}}
@@ -317,48 +357,59 @@ class PartyEngine:
         """Start a party on ``speakers`` (the first leads) and return it.
 
         Raises ``SpeakerTaken`` for a speaker another party holds unless
-        ``take``, and ``MixedHousehold`` for speakers on two systems."""
-        speakers = list(dict.fromkeys(speakers))
-        if not speakers:
-            raise ValueError("at least one speaker is needed")
-        household = self._household(speakers)
-        taken = self._check_taken(speakers, take)
-        if music and music.get("kind") == "tv" and music.get("source") in speakers:
-            # The television's soundbar leads its group.
-            speakers.remove(music["source"])
-            speakers.insert(0, music["source"])
-        volumes = {z: int(v) for z, v in (volumes or {}).items() if z in speakers}
-        self._busy += 1
-        try:
-            for zone, old in taken:
-                await self._hand_over(old, zone)
+        ``take``, ``MixedHousehold`` for speakers on two systems, and
+        ``NoSpeakers`` when none of them can be reached or what they were
+        could not be written down. A speaker that is not on the network is
+        left out."""
+        async with self._lock:
+            speakers = list(dict.fromkeys(speakers))
+            if not speakers:
+                raise ValueError("at least one speaker is needed")
+            household = self._household(speakers)
+            speakers = [z for z in speakers if self._online(z)]
+            if not speakers:
+                raise NoSpeakers("none of the speakers can be reached")
+            taken = self._check_taken(speakers, take)
+            if music and music.get("kind") == "tv" and music.get("source") in speakers:
+                # The television's soundbar leads its group.
+                speakers.remove(music["source"])
+                speakers.insert(0, music["source"])
+            volumes = {z: int(v) for z, v in (volumes or {}).items() if z in speakers}
+            # Built (and so checked) before any other party is touched.
             scene = scenes.normalize({"name": name, "groups": [{
                 "household": household,
                 "rooms": [{"uuid": z, "volume": volumes.get(z)} for z in speakers],
                 "play": music or {"kind": "silence"}}]}, household)
+            for zone, old in taken:
+                await self._hand_over(old, zone)
             report = await scenes.apply(self._controller, self._commands, scene, self._metadata_fn)
-            before = report.get("before")
-            records = _split(before, speakers)
-            # A speaker the scene could not reach is not the party's.
-            held = [z for z in speakers if z in records] if before else speakers
+            records = _split(report.get("before"), speakers)
+            # A speaker the scene could not reach or write down is not the party's.
+            held = [z for z in speakers if records.get(z)]
+            if not held:
+                for zone, _ in taken:
+                    self._stacks.pop(zone, None)
+                self._save()
+                raise NoSpeakers("what the speakers were could not be written down")
+            await self._keep_queue(records[held[0]], held[0])
             party = Party(id="pt_" + secrets.token_hex(6), name=scene["name"], owner=by.id, owner_name=by.name,
                           household=household, speakers=held, volumes={z: v for z, v in volumes.items() if z in held},
-                          state="playing" if held else "paused", preset_id=preset_id, created=time.time())
+                          state="playing", preset_id=preset_id, created=time.time())
             self._parties[party.id] = party
             for zone in held:
-                self._push(zone, party.id, records.get(zone))
+                self._push(zone, party.id, records[zone])
+            for zone, _ in taken:
+                if zone not in held:
+                    self._stacks.pop(zone, None)
             self._save()
-        finally:
-            self._busy -= 1
         return {**asdict(party), "report": {k: report.get(k) for k in ("set", "missing", "failed")}}
 
     async def end(self, party_id: str) -> dict:
         """End the party: each speaker rejoins the party it was taken from if
         that one is still going, else goes back to how it was before any
         party. The party and its attribution are forgotten."""
-        party = self._party(party_id)
-        self._busy += 1
-        try:
+        async with self._lock:
+            party = self._party(party_id)
             plans = {zone: self._leave_plan(zone, party_id) for zone in party.speakers}
             for zone in list(self._stacks):
                 self._drop_entries(zone, party_id)
@@ -367,59 +418,62 @@ class PartyEngine:
             self._save()
             report = await self._release(plans)
             self._save()
-        finally:
-            self._busy -= 1
         return {"id": party_id, "name": party.name, **report}
 
     async def add_speaker(self, party_id: str, zone: str, by: Actor, take: bool = False) -> dict:
         """Add ``zone`` to the party: its state is written down, it steps out
         of whatever group it is in, then joins the party's lead (or leads
-        the party, when the party has no speakers left)."""
-        party = self._party(party_id)
-        if zone in party.speakers:
-            return self.get(party_id)
-        if self._household([zone]) != party.household:
-            raise MixedHousehold([party.household, self._household([zone])])
-        taken = self._check_taken([zone], take, mine=party_id)
-        self._busy += 1
-        try:
-            for z, old in taken:
-                await self._hand_over(old, z)
+        the party, when the party has no speakers left). Raises
+        ``NoSpeakers`` for a speaker that cannot be reached."""
+        async with self._lock:
+            party = self._party(party_id)
+            if zone in party.speakers:
+                return self.get(party_id)
+            if self._household([zone]) != party.household:
+                raise MixedHousehold([party.household, self._household([zone])])
+            if not self._online(zone):
+                raise NoSpeakers(f"{zone} cannot be reached")
+            taken = self._check_taken([zone], take, mine=party_id)
             volume = party.volumes.get(zone)
             scene = scenes.normalize({"name": party.name, "groups": [{
                 "household": party.household, "rooms": [{"uuid": zone, "volume": volume}], "play": None}]},
                 party.household)
+            for z, old in taken:
+                await self._hand_over(old, z)
             report = await scenes.apply(self._controller, self._commands, scene, self._metadata_fn)
             record = _split(report.get("before"), [zone]).get(zone)
+            if record is None:
+                self._stacks.pop(zone, None)
+                self._save()
+                raise NoSpeakers(f"what {zone} was could not be written down")
             if party.speakers:
                 try:
                     await self._commands.join(zone, party.speakers[0])
+                    await self._settle({zone: party.speakers[0]})
                 except Exception as exc:              # noqa: BLE001 - reported by the topology that follows
                     log.info("party %r: %s could not join: %s", party.name, zone, exc)
+            else:
+                await self._keep_queue(record, zone)
             party.speakers.append(zone)
             party.state = "playing"
             self._push(zone, party_id, record)
             self._save()
-        finally:
-            self._busy -= 1
-        return self.get(party_id)
+            return self.get(party_id)
 
     async def remove_speaker(self, party_id: str, zone: str) -> dict:
         """Take ``zone`` out of the party, back to the party it came from if
         that one is still going, else to before any party."""
-        party = self._party(party_id)
-        if zone not in party.speakers:
-            return self.get(party_id)
-        self._busy += 1
-        try:
+        async with self._lock:
+            party = self._party(party_id)
+            if zone not in party.speakers:
+                return self.get(party_id)
             await self._hand_over(party, zone)
             plans = {zone: self._leave_plan(zone, party_id)}
             self._save()
             await self._release(plans)
             self._save()
-        finally:
-            self._busy -= 1
-        return self.get(party_id)
+            return self.get(party_id)
+
 
     # -- who added what ------------------------------------------------------
 
@@ -460,28 +514,42 @@ class PartyEngine:
 
     async def on_state(self, message: dict) -> None:
         """After a topology change, let go of every party speaker that is no
-        longer in its party lead's group, and say so. Never regroups."""
-        if message.get("type") not in _TOPOLOGY_MESSAGES or self._busy:
+        longer in the party's group, and say so. Never regroups.
+
+        The party's group is the one holding most of its speakers (on a tie,
+        the one its lead is in), so a lead moved away by another app is the
+        one let go, and the party's lead becomes that group's. Nothing is
+        read while the engine itself is regrouping."""
+        if message.get("type") not in _TOPOLOGY_MESSAGES or self._lock.locked():
             return
         notices = []
+        changed = False
         for party in list(self._parties.values()):
-            if not party.speakers:
+            leads = {z: self._lead_of(z) for z in party.speakers}
+            known = {z: lead for z, lead in leads.items() if lead is not None}
+            if not known:
                 continue
-            lead = self._lead_of(party.speakers[0])
-            if lead is None:
-                continue
-            for zone in list(party.speakers[1:]):
-                mine = self._lead_of(zone)
-                if mine is None or mine == lead:
+            counts = Counter(known.values())
+            best = max(counts.values())
+            current = known.get(party.speakers[0])
+            group = current if current is not None and counts[current] == best \
+                else next(lead for lead, n in counts.items() if n == best)
+            for zone, lead in known.items():
+                if lead == group:
                     continue
                 party.speakers.remove(zone)
                 party.volumes.pop(zone, None)
                 # Moved by hand, it is in no party now: no way back is owed.
                 self._stacks.pop(zone, None)
                 notices.append({"type": "party_notice", "party": party.id, "zone": zone, "event": "left"})
+            head = group if group in party.speakers else next((z for z in party.speakers if known.get(z) == group), None)
+            if head is not None and party.speakers and party.speakers[0] != head:
+                party.speakers.remove(head)
+                party.speakers.insert(0, head)
+                changed = True
             if not party.speakers:
                 party.state = "paused"
-        if notices:
+        if notices or changed:
             self._save()
-            for notice in notices:
-                await self._notify(notice)
+        for notice in notices:
+            await self._notify(notice)
