@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 __all__ = [
     "Video", "AudioSource", "YouTubeError", "NoAudio",
-    "parse_video_id", "search", "info", "audio_source",
+    "parse_video_id", "search", "info", "audio_source", "forget_audio",
 ]
 
 _ID = re.compile(r"[A-Za-z0-9_-]{11}")
@@ -157,6 +157,12 @@ def _expiry(url: str) -> float:
         return exp - _EXPIRE_MARGIN
     except (KeyError, IndexError, ValueError):
         return time.time() + _FALLBACK_TTL
+
+
+def forget_audio(video_id: str) -> None:
+    """Drop the cached stream URL (googlevideo answered 403/410: it expired
+    early or was revoked), so the next ``audio_source`` resolves afresh."""
+    _audio_cache.pop(video_id, None)
 
 
 async def audio_source(video_id: str) -> AudioSource:

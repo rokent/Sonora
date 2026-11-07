@@ -93,6 +93,7 @@ EXPECTED_GUEST_READS = {
     ("GET", "/api/health"),
     ("GET", "/api/art"),
     ("GET", "/api/stream/audio/{key}"),
+    ("GET", "/api/home/media/{key}.m4a"),          # public: speakers
     ("GET", "/api/state"),
     ("GET", "/api/favorites"),
     ("GET", "/api/services"),
