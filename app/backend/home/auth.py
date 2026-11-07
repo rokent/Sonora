@@ -36,7 +36,10 @@ class Principal:
 
     @property
     def is_user(self) -> bool:
-        return self.kind in ("user", "service")
+        """A household member. Not a service (Home Assistant's token), which
+        the permission guard keeps to ``/api/ha/`` and which never counts as
+        a person."""
+        return self.kind == "user"
 
     @property
     def is_guest(self) -> bool:

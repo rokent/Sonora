@@ -42,6 +42,8 @@ _held: dict[str, Any] = {}
 #: Who opened each party's page: ``{party: {principal id: {id, name, kind, at}}}``.
 #: Presence only, kept in memory; it grants nothing.
 _members: dict[str, dict[str, dict]] = {}
+#: Background reads the engine started; held so they are not collected.
+_tasks: set[asyncio.Task] = set()
 #: Reading a queue position then changing it is one step for Sonora's callers.
 _queue_lock = asyncio.Lock()
 
@@ -104,7 +106,25 @@ def engine() -> PartyEngine:
             log.exception("files: startup cleanup failed")
         _held["engine"] = held = (controller, path, found)
         _members.clear()
+        _catch_up(found)
     return held[2]
+
+
+def _catch_up(found: PartyEngine) -> None:
+    """Read the speakers once as the engine starts listening, so a party
+    speaker that left while Sonora was not listening is let go now."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    async def read() -> None:
+        try:
+            await found.on_state({"type": "snapshot"})
+        except Exception:                              # noqa: BLE001 - logged, never raised
+            log.exception("parties: the first read of the speakers failed")
+    task = loop.create_task(read())
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
 
 
 def presets() -> Presets:
@@ -255,9 +275,15 @@ class TakeBody(BaseModel):
     take: bool = False
 
 
+#: The longest track URI and DIDL a party queue add takes; beyond these
+#: the body is refused (422) before anything reaches a speaker.
+URI_MAX = 2048
+METADATA_MAX = 65536
+
+
 class QueueBody(BaseModel):
-    uri: str = Field(min_length=1)
-    metadata: str = ""
+    uri: str = Field(min_length=1, max_length=URI_MAX)
+    metadata: str = Field(default="", max_length=METADATA_MAX)
     title: str = ""
 
 

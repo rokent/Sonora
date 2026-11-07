@@ -547,11 +547,6 @@ def register_source(party_id: str, pcm: AsyncIterator[bytes]) -> Callable[[], No
 
 # --- /ws/visual ----------------------------------------------------------------
 
-def _principal(websocket: WebSocket):
-    from .permissions import _principal as principal_of_connection
-    return principal_of_connection(websocket)
-
-
 def party_known(party_id: str, principal) -> bool:
     """Whether the party exists for this viewer (a guest sees running ones only)."""
     from . import routes
@@ -576,11 +571,12 @@ async def visual_socket(websocket: WebSocket) -> None:
     if not origin.websocket_allowed(websocket):
         await websocket.close(code=1008)
         return
-    principal = _principal(websocket)
-    websocket.state.principal = principal
-    if principal is None or principal.kind == "service":
+    from .permissions import ws_allowed
+
+    if not ws_allowed(websocket):
         await websocket.close(code=1008)
         return
+    principal = websocket.state.principal
     await websocket.accept()
     found = analyzer()
     if found is None:

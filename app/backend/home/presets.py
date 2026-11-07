@@ -4,13 +4,12 @@ household (system); the household lookup is passed in by the caller."""
 
 from __future__ import annotations
 
-import json
-import os
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
+from backend.home.store import load_json, write_json
 from backend.sonos import scenes
 
 NAME_LIMIT = 60
@@ -19,13 +18,6 @@ TV_SHOWS = ("video", "visualizer", "cover")
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1))
-    os.replace(tmp, path)
 
 
 def _normalize(body: dict, household_of: Callable[[str], str | None]) -> dict:
@@ -84,10 +76,7 @@ class Presets:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._items: list[dict] = []
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, ValueError):
-            data = None
+        data = load_json(path)
         if isinstance(data, dict) and isinstance(data.get("presets"), list):
             self._items = [p for p in data["presets"] if isinstance(p, dict) and p.get("id")]
 
@@ -130,4 +119,4 @@ class Presets:
         return None
 
     def _save(self) -> None:
-        _write_json(self._path, {"presets": self._items})
+        write_json(self._path, {"presets": self._items})

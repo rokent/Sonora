@@ -35,7 +35,8 @@ Restart Sonora after changing them.
 
 ## Sessions and guests
 
-- A signed-in session lasts 30 days.
+- A signed-in session lasts 30 days. Sonora checks the group only when someone signs in, so removing a person from the Authentik group (or disabling them in Authentik) does not end a session they already have: they stay signed in until it runs out.
+- To sign everyone out at once, stop Sonora, delete `<data dir>/home/secret.key`, and start it again. Sonora makes a new key, every session (users, guests and TV displays) stops working: users sign in again, guests scan the guest link again, and each TV opens its display link again. Home Assistant tokens, the guest link and display links keep working.
 - Guests join with the link `/join?token=...` (shown as a QR code). A guest session lasts 12 hours.
 - Making a new guest link ends every guest session that used the old one.
 
