@@ -42,6 +42,28 @@ def _resolve(target: Target) -> str | None:
     return ident
 
 
+def _party_of(zone: str) -> str | None:
+    """The running party (one with speakers) holding room ``zone``."""
+    try:
+        engine = routes.engine()
+    except routes.Refused:
+        return None
+    party_id = engine.owner_of(zone)
+    if party_id is None:
+        return None
+    party = engine.get(party_id)
+    return party_id if party and party.get("speakers") else None
+
+
+def _scream_party_ended(party_id: str) -> None:
+    """A party ended: Scream sources mapped to it are unmapped (said once),
+    instead of retrying a party that will not come back."""
+    from . import scream
+    receiver = scream._receiver
+    if receiver is not None:
+        receiver.party_ended(party_id)
+
+
 def hub() -> LiveHub:
     """The live hub for the running controller (503 ``Refused`` before the
     controller is up)."""
@@ -51,8 +73,14 @@ def hub() -> LiveHub:
         raise routes.Refused(503, "not_ready")
     held = _held.get("hub")
     if held is None or held[0] is not controller:
+        if held is not None:
+            routes.off_change(held[1].rooms_changed)
         held = _held["hub"] = (controller, LiveHub(controller=controller, commands=commands,
-                                                   resolve=_resolve, base_url=media.speaker_base))
+                                                   resolve=_resolve, base_url=media.speaker_base,
+                                                   party_of=_party_of))
+        # A room taken into a party mid-live: its own session ends (all
+        # sources alike), from the engine's change notices.
+        routes.on_change(held[1].rooms_changed)
     found = held[1]
     try:
         engine = routes.engine()
@@ -60,12 +88,18 @@ def hub() -> LiveHub:
         engine = None
     if engine is not None and _held.get("engine") != (engine, found):
         engine.on_end(found.end_for_party)
+        if _held.get("scream_engine") is not engine:
+            engine.on_end(_scream_party_ended)
+            _held["scream_engine"] = engine
         _held["engine"] = (engine, found)
     return found
 
 
 def reset() -> None:
     """Forget the hub in use (tests)."""
+    held = _held.get("hub")
+    if held is not None:
+        routes.off_change(held[1].rooms_changed)
     _held.clear()
 
 
@@ -81,4 +115,6 @@ async def live_stream(key: str, request: Request) -> Response:
         return JSONResponse({"error": "not_found"}, status_code=404)
     if request.method == "HEAD":
         return Response(status_code=200, media_type="audio/mpeg", headers=_HEADERS)
+    if not found.has_room():
+        return JSONResponse({"error": "too_many_listeners"}, status_code=503)
     return StreamingResponse(found.listen(), media_type="audio/mpeg", headers=_HEADERS)

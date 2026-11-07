@@ -67,6 +67,9 @@ class FakeCommands:
     async def play(self, zone):
         self.calls.append(("play", zone))
 
+    async def set_source(self, zone, uri, metadata=""):
+        self.calls.append(("set_source", zone, uri, metadata))
+
     def resumes(self):
         return [c for c in self.calls if c[0] != "play_now"]
 
@@ -97,9 +100,11 @@ async def _never(_seconds):
     await asyncio.Event().wait()
 
 
-def make_hub(parties=("p1",), analysis=None):
+def make_hub(parties=("p1",), analysis=None, members=None):
+    """``members``: ``{room: party}`` for rooms in a running party."""
     clock, spawner, commands, ctl = Clock(), Spawner(), FakeCommands(), FakeController()
     running = set(parties)
+    members = {} if members is None else members
 
     def resolve(target):
         kind, ident = target
@@ -109,9 +114,10 @@ def make_hub(parties=("p1",), analysis=None):
 
     hub = live.LiveHub(controller=ctl, commands=commands, resolve=resolve,
                        base_url=lambda host: "http://10.0.0.2:8080", spawn=spawner,
-                       clock=clock, sleep=_never, analysis=analysis)
+                       clock=clock, sleep=_never, analysis=analysis,
+                       party_of=lambda zone: members.get(zone))
     return SimpleNamespace(hub=hub, clock=clock, spawner=spawner, commands=commands,
-                           ctl=ctl, running=running)
+                           ctl=ctl, running=running, members=members)
 
 
 async def _settle():
@@ -239,6 +245,44 @@ async def test_digital_silence_counts_as_no_sound():
     assert await s.check_idle()
 
 
+async def test_near_silence_idles_out_and_resumes_the_queue():
+    t = make_hub()
+    s = await t.hub.start(target=("party", "p1"), source_name="x", by="u")
+    t.ctl.zones["RINCON_A"].transport = transport(uri=f"x-rincon-mp3radio://live/{s.key}")
+    await s.feed(b"\x00\x10" * 64)                   # sound
+    for _ in range(9):                                 # then +-2 LSB of noise
+        t.clock.now += 1
+        await s.feed(b"\x02\x00\xfe\xff\x01\x00\x00\x00" * 64)
+    assert await s.check_idle()
+    assert s.reason == "idle"
+    assert [c[0] for c in t.commands.resumes()] == ["seek_track", "seek_time", "play"]
+
+
+def test_is_quiet_thresholds_per_width():
+    q = live.is_quiet
+    assert q(b"", ("s16le", 44100, 2))
+    assert q((16).to_bytes(2, "little", signed=True) * 8 + (-16).to_bytes(2, "little", signed=True) * 8,
+             ("s16le", 44100, 2))
+    assert not q((17).to_bytes(2, "little", signed=True) * 2, ("s16le", 44100, 2))
+    assert not q((-17).to_bytes(2, "little", signed=True) * 2, ("s16le", 44100, 2))
+    assert q((4096).to_bytes(3, "little", signed=True) * 4, ("s24le", 48000, 2))
+    assert not q((4097).to_bytes(3, "little", signed=True) * 4, ("s24le", 48000, 2))
+    assert not q((-4097).to_bytes(3, "little", signed=True) * 4, ("s24le", 48000, 2))
+    assert q((16 << 16).to_bytes(4, "little", signed=True) * 2, ("s32le", 48000, 1))
+    assert not q(((16 << 16) + 1).to_bytes(4, "little", signed=True) * 2, ("s32le", 48000, 1))
+    assert not q(b"\x00\x00\x00\x10", ("s16le", 44100, 2))   # the right channel counts
+    assert q(b"\x00" * 5, ("s16le", 44100, 2))                   # a partial frame is ignored
+    assert q(b"\x00" * 8, ("f32le", 44100, 2)) and not q(b"\x01", ("f32le", 44100, 2))
+
+
+def test_is_quiet_strides_through_long_chunks():
+    loud = b"\x00\x40" * 2
+    quiet = b"\x01\x00" * 2
+    chunk = quiet * 90000 + loud * 10000      # a loud tenth at the end is seen
+    assert not live.is_quiet(chunk, ("s16le", 44100, 2))
+    assert live.is_quiet(quiet * 100000, ("s16le", 44100, 2))
+
+
 async def test_the_watchdog_runs_by_itself():
     t = make_hub()
     t.hub._sleep = lambda _s: asyncio.sleep(0)
@@ -271,12 +315,35 @@ async def test_position_of_a_playing_queue_is_advanced_to_now(monkeypatch):
     assert ("seek_time", "RINCON_A", "0:01:02") in t.commands.calls
 
 
-async def test_nothing_to_resume_when_no_queue_was_playing():
+async def test_nothing_to_resume_when_nothing_was_playing():
     t = make_hub()
-    t.ctl.zones["RINCON_A"].transport = transport(uri="x-sonosapi-stream:s1?sid=254")
+    t.ctl.zones["RINCON_A"].transport = transport(uri="x-sonosapi-stream:s1?sid=254",
+                                                  state="PAUSED_PLAYBACK")
     s = await t.hub.start(target=("party", "p1"), source_name="x", by="u")
     await s.end("disconnected")
     assert t.commands.resumes() == []
+
+
+@pytest.mark.parametrize("uri", ["x-sonosapi-stream:s1?sid=254", "x-rincon-stream:RINCON_B",
+                                 "x-sonos-htastream:RINCON_A:spdif"])
+async def test_a_playing_station_line_in_or_tv_comes_back_after_live(uri):
+    t = make_hub()
+    t.ctl.zones["RINCON_A"].transport = transport(uri=uri)
+    t.ctl.zones["RINCON_A"].media_metadata = "<DIDL-Lite>station</DIDL-Lite>"
+    s = await t.hub.start(target=("party", "p1"), source_name="x", by="u")
+    t.ctl.zones["RINCON_A"].transport = transport(uri=f"x-rincon-mp3radio://x/api/home/live/{s.key}.mp3")
+    await s.end("idle")
+    assert t.commands.resumes() == [("set_source", "RINCON_A", uri, "<DIDL-Lite>station</DIDL-Lite>"),
+                                    ("play", "RINCON_A")]
+
+
+async def test_live_sound_itself_or_a_group_member_is_not_a_resume_point():
+    for uri in ("x-rincon-mp3radio://10.0.0.2:8080/api/home/live/abc.mp3", "x-rincon:RINCON_B"):
+        t = make_hub()
+        t.ctl.zones["RINCON_A"].transport = transport(uri=uri)
+        s = await t.hub.start(target=("party", "p1"), source_name="x", by="u")
+        await s.end("disconnected")
+        assert t.commands.resumes() == [], uri
 
 
 async def test_newer_session_replaces_older_and_resumes_once():
@@ -340,6 +407,77 @@ async def _async_noop(*_a):
 def _party(pid):
     from backend.home.parties import Party
     return Party.from_dict({"id": pid, "name": "P", "speakers": [], "created": 1.0})
+
+
+# --- one session per set of speakers ---------------------------------------
+
+
+async def test_a_room_in_a_running_party_plays_on_the_party():
+    t = make_hub(members={"RINCON_A": "p1"})
+    party = await t.hub.start(target=("party", "p1"), source_name="A", by="u")
+    room = await t.hub.start(target=("zone", "RINCON_A"), source_name="B", by="u")
+    assert room.target == ("party", "p1")
+    assert party.ended and party.reason == "replaced"
+    assert t.hub.current(("zone", "RINCON_A")) is None
+    assert t.hub.current(("party", "p1")) is room
+    await room.end("idle")
+    assert [c[0] for c in t.commands.resumes()] == ["seek_track", "seek_time", "play"]
+
+
+async def test_a_session_on_the_same_coordinator_is_replaced_and_hands_over_its_point():
+    t = make_hub()
+    # RINCON_B is grouped with RINCON_A: its coordinator is RINCON_A.
+    t.ctl.zones["RINCON_B"] = SimpleNamespace(uuid="RINCON_B", host="10.0.0.6",
+                                              transport=transport(uri="x-rincon:RINCON_A"))
+    first = await t.hub.start(target=("party", "p1"), source_name="A", by="u")
+    t.ctl.zones["RINCON_A"].transport = transport(track=1, uri=f"x-rincon-mp3radio://x/{first.key}")
+    second = await t.hub.start(target=("zone", "RINCON_B"), source_name="B", by="u")
+    assert first.ended and first.reason == "replaced" and not second.ended
+    assert t.hub.sessions() == [second]
+    assert t.commands.resumes() == []
+    await second.end("idle")
+    assert t.commands.resumes() == [("seek_track", "RINCON_A", 3),
+                                    ("seek_time", "RINCON_A", "0:01:05"),
+                                    ("play", "RINCON_A")]
+
+
+async def test_a_room_joining_a_party_mid_live_ends_its_session_without_resume():
+    t = make_hub()
+    s = await t.hub.start(target=("zone", "RINCON_A"), source_name="A", by="u")
+    t.hub.rooms_changed()                       # nothing changed for this room
+    await _settle()
+    assert not s.ended
+    t.members["RINCON_A"] = "p1"
+    t.hub.rooms_changed()
+    await _settle()
+    assert s.ended and s.reason == "joined_party"
+    assert t.commands.resumes() == []
+    assert t.hub.current(("zone", "RINCON_A")) is None
+
+
+async def test_live_routes_hub_follows_party_changes(monkeypatch):
+    from backend.home import routes
+    live_routes.reset()
+    listeners = []
+    monkeypatch.setattr(routes, "_change_listeners", listeners)
+    monkeypatch.setattr(main, "state", {**main.state, "controller": FakeController(),
+                                        "commands": FakeCommands()})
+    monkeypatch.setattr(routes, "engine", lambda: (_ for _ in ()).throw(routes.Refused(503, "x")))
+    found = live_routes.hub()
+    assert listeners == [found.rooms_changed]
+    assert live_routes.hub() is found and len(listeners) == 1
+    live_routes.reset()
+    assert listeners == []
+
+
+def test_party_of_reads_the_running_party(monkeypatch):
+    from backend.home import routes
+    engine = SimpleNamespace(owner_of=lambda z: {"A": "p1", "B": "p2"}.get(z),
+                             get=lambda p: {"p1": {"speakers": ["A"]}, "p2": {"speakers": []}}.get(p))
+    monkeypatch.setattr(routes, "engine", lambda: engine)
+    assert live_routes._party_of("A") == "p1"
+    assert live_routes._party_of("B") is None      # a party with no speakers is not running
+    assert live_routes._party_of("C") is None
 
 
 # --- the analyzer ---------------------------------------------------------
@@ -416,6 +554,18 @@ async def test_route_head_and_stream(app_hub):
     got = await asyncio.wait_for(c.request("GET", f"/api/home/live/{s.key}.mp3"), 2)
     await task
     assert got.status == 200 and got.body == b"MP3DATA"
+
+
+async def test_at_most_16_listeners_per_session(app_hub):
+    s = await app_hub.hub.start(target=("party", "p1"), source_name="x", by="u")
+    streams = [s.listen() for _ in range(live.MAX_LISTENERS)]
+    assert not s.has_room()
+    c = Client(main.app, host="sonora.local")
+    got = await asyncio.wait_for(c.request("GET", f"/api/home/live/{s.key}.mp3"), 2)
+    assert got.status == 503
+    assert (await c.request("HEAD", f"/api/home/live/{s.key}.mp3")).status == 200
+    await s.end("test")
+    del streams
 
 
 def test_live_urls_are_public():
