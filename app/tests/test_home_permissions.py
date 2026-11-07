@@ -72,12 +72,17 @@ def _guest_reachable() -> set[tuple[str, str]]:
 
 # --- the rules ----------------------------------------------------------
 
-#: Every write a guest can make on the real app. Today only the public sign-in
-#: routes. Task 5 adds the party writes (join, queue, transport, volume) here,
-#: explicitly. Anything else showing up means a write was opened to guests.
+#: Every write a guest can make on the real app: the public sign-in routes and
+#: the party writes (join, queue add/remove, volume). The transport route's
+#: ``{action}`` is sampled as "1", which no guest rule admits, so it is checked
+#: on its own below. Anything else showing up means a write was opened to guests.
 EXPECTED_GUEST_WRITES = {
     ("POST", "/auth/guest"),
     ("POST", "/auth/logout"),
+    ("POST", "/api/parties/{party_id}/join"),
+    ("POST", "/api/parties/{party_id}/queue"),
+    ("DELETE", "/api/parties/{party_id}/queue/{index}"),
+    ("POST", "/api/parties/{party_id}/volume"),
 }
 
 #: Every read a guest can make on the real app, so a new upstream route that
@@ -103,6 +108,8 @@ EXPECTED_GUEST_READS = {
     ("GET", "/api/browse"),
     ("GET", "/api/browse/letters"),
     ("GET", "/api/queue/{uuid}"),
+    ("GET", "/api/parties"),
+    ("GET", "/api/parties/{party_id}/queue"),
     ("GET", "/api/themes"),
     ("GET", "/api/themes/schema"),
     ("GET", "/api/themes/reference"),
@@ -117,6 +124,15 @@ def test_every_upstream_write_is_denied_to_guests():
     all_writes = {(m, getattr(r, "path", "")) for r in _routes(main.app.routes)
                   for m in getattr(r, "methods", None) or () if m not in ("GET", "HEAD")}
     assert len(all_writes) > 50 and ("POST", "/auth/guest") in all_writes
+
+
+def test_guest_transport_on_the_real_app():
+    paths = {getattr(r, "path", "") for r in _routes(main.app.routes)
+             if "POST" in (getattr(r, "methods", None) or ())}
+    assert "/api/parties/{party_id}/transport/{action}" in paths
+    for action in ("play", "pause", "next", "previous"):
+        assert allowed(GUEST_P, "POST", f"/api/parties/p1/transport/{action}")
+    assert not allowed(GUEST_P, "POST", "/api/parties/p1/transport/stop")
 
 
 def test_guest_reads_on_the_real_app_are_pinned():
