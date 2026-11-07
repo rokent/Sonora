@@ -6,7 +6,10 @@
 //   1. exact: the party's own audio, analysed on the server (/ws/visual),
 //      when the server can (config `visuals`, or the socket not closing
 //      4001) and the track passes through it (isRelayed). Frames are lined
-//      up with the speaker's clock by visualFrames.js;
+//      up with the speaker's clock by visualFrames.js; for live sound
+//      (`live`: the party plays Sonora's /api/home/live/ stream) they are
+//      drawn a fixed delay after they arrive instead (visualFrames "live"
+//      alignment), the offset moving that delay;
 //   2. microphone: only on a secure page, after a tap on "Use microphone";
 //   3. generic: a slow synthetic waveform pulsing at 120 BPM.
 // While the speaker is paused (and no microphone listens) it is fed silence.
@@ -22,7 +25,8 @@ import { useI18n } from '../i18n/index.jsx'
 import { request } from '../lib/api.js'
 import { socketUrl } from '../lib/base.js'
 import {
-  LEVELS_SAMPLES, createFrameQueue, decodeFrame, silence, speakerTime, syntheticWave, upsample,
+  LEVELS_SAMPLES, LIVE_QUEUE_MAX, createFrameQueue, decodeFrame, frameTarget, liveStamper, silence,
+  syntheticWave, upsample,
 } from './visualFrames.js'
 import './visualizer.css'
 
@@ -68,7 +72,8 @@ function webgl2Supported() {
 }
 
 export default function VisualizerCanvas({
-  partyId, trackUri, positionSeconds, positionAt, playing, isRelayed, offsetSeconds = 0,
+  partyId, trackUri, positionSeconds, positionAt, playing, isRelayed, live: liveSound = false,
+  offsetSeconds = 0,
 }) {
   const { t } = useI18n()
   const wrapRef = useRef(null)
@@ -80,6 +85,16 @@ export default function VisualizerCanvas({
   const mounted = useRef(false)
   const queueRef = useRef(null)
   if (!queueRef.current) queueRef.current = createFrameQueue()
+  // Live sound's frames, stamped with their arrival (visualFrames.js).
+  const liveQueueRef = useRef(null)
+  if (!liveQueueRef.current) liveQueueRef.current = createFrameQueue({ max: LIVE_QUEUE_MAX })
+  const stampRef = useRef(null)
+  if (!stampRef.current) stampRef.current = liveStamper()
+  const clearQueues = () => {
+    queueRef.current.clear()
+    liveQueueRef.current.clear()
+    stampRef.current = liveStamper()
+  }
   const nextRef = useRef(() => {})
   const [generation, setGeneration] = useState(0) // a new canvas after a context restore
   const [unsupported, setUnsupported] = useState(false)
@@ -89,7 +104,7 @@ export default function VisualizerCanvas({
 
   // What the animation loop reads, current without restarting it.
   const live = useRef({})
-  live.current = { positionSeconds, positionAt, playing, isRelayed, offsetSeconds, exactLive }
+  live.current = { positionSeconds, positionAt, playing, isRelayed, offsetSeconds, exactLive, liveSound }
 
   // The server says up front when it cannot analyse; an older one that does
   // not say is found out by the socket closing 4001.
@@ -104,7 +119,6 @@ export default function VisualizerCanvas({
   // The server's frames, for a relayed track.
   useEffect(() => {
     if (!partyId || !isRelayed || exactOff) return undefined
-    const queue = queueRef.current
     let socket = null
     let timer = null
     let stopped = false
@@ -122,12 +136,14 @@ export default function VisualizerCanvas({
       socket.onopen = () => { openedAt = Date.now(); setExactLive(true) }
       socket.onmessage = (event) => {
         const frame = decodeFrame(event.data)
-        if (frame && ++frames === HEALTHY_FRAMES) backoff = BACKOFF_MIN
-        queue.push(frame)
+        if (!frame) return
+        if (++frames === HEALTHY_FRAMES) backoff = BACKOFF_MIN
+        if (live.current.liveSound) liveQueueRef.current.push(stampRef.current(frame, Date.now() / 1000))
+        else queueRef.current.push(frame)
       }
       socket.onclose = (event) => {
         setExactLive(false)
-        queue.clear()
+        clearQueues()
         if (stopped) return
         if (event.code === CLOSE_DISABLED) { exactDisabled = true; setExactOff(true); return }
         if (event.code === CLOSE_NOT_ALLOWED) return
@@ -152,12 +168,12 @@ export default function VisualizerCanvas({
       clearTimeout(timer)
       if (socket) { socket.onclose = null; socket.close() }
       setExactLive(false)
-      queue.clear()
+      clearQueues()
     }
-  }, [partyId, isRelayed, exactOff])
+  }, [partyId, isRelayed, exactOff]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // A new track: whatever was queued belongs to the old one.
-  useEffect(() => { queueRef.current.clear() }, [trackUri])
+  useEffect(() => { clearQueues() }, [trackUri, liveSound]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // The audio context, for the life of the component: Butterchurn needs one,
   // and a microphone hangs off it.
@@ -240,7 +256,9 @@ export default function VisualizerCanvas({
       const now = live.current
       let frame = null
       if (now.exactLive && now.isRelayed && now.playing) {
-        frame = queueRef.current.take(speakerTime(now) + (Number(now.offsetSeconds) || 0))
+        const mode = now.liveSound ? 'live' : 'track'
+        const queue = now.liveSound ? liveQueueRef.current : queueRef.current
+        frame = queue.take(frameTarget({ mode, speaker: now, offsetSeconds: now.offsetSeconds, now: Date.now() }))
       }
       try {
         if (frame) {

@@ -11,7 +11,11 @@
 //   playing          whether the speaker is playing
 //   isRelayed        whether the track's audio passes through Sonora (only
 //                    then can the server analyse it)
+//   live             optional: the party plays Sonora's live sound stream
+//                    (/api/home/live/), so frames are drawn a fixed delay
+//                    after they arrive rather than matched to the track time
 //   offsetSeconds    optional, added to the speaker time when picking a frame
+//                    (for live sound it shortens the delay instead)
 import React, { Component, Suspense, lazy } from 'react'
 import { useI18n } from '../i18n/index.jsx'
 import './visualizer.css'

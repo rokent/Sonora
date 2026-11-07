@@ -9,6 +9,14 @@
 // -- a hiccup on the socket, or the old track after a skip -- and is dropped
 // rather than drawn late.
 //
+// Live sound (a party playing Sonora's /api/home/live/ stream: AirPlay, the
+// Windows sound card, a browser tab) has no track position to match: the
+// speaker buffers the stream for a few seconds and reports no useful time.
+// There the alignment is "live": each frame is stamped with when it arrived
+// (liveStamper), and drawn a fixed delay later (LIVE_DELAY_SECONDS, moved by
+// the same offset the video uses). Approximate, but in step once the delay
+// matches the speaker's buffer.
+//
 // No DOM and no React, so it runs under node in lib/visualFrames.check.mjs.
 
 export const FRAME_SAMPLES = 512
@@ -27,6 +35,63 @@ export const STALE_SECONDS = 0.25
  * a server leading by more would lose its oldest frames here, which show
  * up as the generic animation until the speaker catches up. */
 export const QUEUE_MAX = 180
+/** Live sound: how long after a frame arrives it is drawn, seconds. About
+ * what a Sonos speaker buffers of an MP3 radio stream before playing it. */
+export const LIVE_DELAY_SECONDS = 3
+/** Live sound: frames held at most. The delay can reach 3 s minus the
+ * offset's -5 s, 8 s, which is 240 frames at 30 a second; this keeps 10 s. */
+export const LIVE_QUEUE_MAX = 300
+/** Live stamps may run ahead of the arrival clock by this much while a
+ * burst is spread out; more means the frames came in faster than real
+ * time, and the stamps go back to the arrival time. */
+const LIVE_SPREAD_MAX = 1
+
+/** Whether a speaker's track URI is Sonora's live sound stream. */
+export function isLiveUri(uri) {
+  return /\/api\/home\/live\/[^/?#\s]+/.test(uri || '')
+}
+
+/** The delay for live frames with the viewer's offset, seconds: a positive
+ * offset puts the picture earlier (as it does for the video), never before
+ * the frame arrived. */
+export function liveDelay(offsetSeconds = 0) {
+  return Math.max(0, LIVE_DELAY_SECONDS - (Number(offsetSeconds) || 0))
+}
+
+/**
+ * Stamps live frames with arrival time (seconds on the caller's clock) in
+ * place of `t`, so a frame queue orders and picks them by arrival. Frames
+ * that arrive together (one network read carrying several) are spread out
+ * by their own spacing in `t` rather than stacked on one instant, so each
+ * still gets drawn; `t` decides nothing else.
+ */
+export function liveStamper() {
+  let last = null // { t, at }: the previous frame's own time and its stamp
+  return function stamp(frame, arrivedSeconds) {
+    if (!frame) return null
+    let at = arrivedSeconds
+    if (last) {
+      const step = frame.t - last.t
+      if (step > 0 && step < 0.5) {
+        const spread = last.at + step
+        if (spread > at && spread - at <= LIVE_SPREAD_MAX) at = spread
+      }
+      // Never earlier than the previous stamp: the queue would take that
+      // for a restart and drop what it holds.
+      at = Math.max(at, last.at)
+    }
+    last = { t: frame.t, at }
+    return { t: at, w: frame.w }
+  }
+}
+
+/** The time a queue is asked for: in "live" mode the arrival clock minus
+ * the live delay; otherwise the speaker's track time plus the offset.
+ * `now` is a ms epoch, as Date.now() gives. */
+export function frameTarget({ mode = 'track', speaker, offsetSeconds = 0, now = Date.now() }) {
+  if (mode === 'live') return now / 1000 - liveDelay(offsetSeconds)
+  return speakerTime(speaker || {}, now) + (Number(offsetSeconds) || 0)
+}
 
 /** The speaker's position now, in seconds: the last report plus its age
  * while playing. `positionAt` is a ms epoch, as Date.now() gives. */
