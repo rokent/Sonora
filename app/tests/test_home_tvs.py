@@ -21,7 +21,7 @@ from aiohttp.test_utils import TestServer
 from test_home_routes import GUEST, USER, client, rig  # noqa: F401
 from test_home_ha import _token, call
 
-from backend.home import tvs
+from backend.home import routes, tvs
 from backend.home.store import home_dir
 
 
@@ -31,6 +31,8 @@ class FakeTv:
 
     def __init__(self, token="tok-123", reply="connect"):
         self.token, self.reply = token, reply
+        self.internet = False          # whether Samsung Internet is "installed"
+        self.probes: list[str] = []
         self.requests: list[dict] = []
         self.received: list[dict] = []
         self.server: TestServer | None = None
@@ -51,9 +53,16 @@ class FakeTv:
                 self.received.append(json.loads(msg.data))
         return ws
 
+    async def _app(self, request):
+        self.probes.append(request.match_info["app"])
+        if self.internet and request.match_info["app"] == tvs.SAMSUNG_INTERNET:
+            return web.json_response({"id": tvs.SAMSUNG_INTERNET, "running": False})
+        return web.json_response({"error": "not found"}, status=404)
+
     async def start(self):
         app = web.Application()
         app.router.add_get("/api/v2/channels/samsung.remote.control", self._ws)
+        app.router.add_get("/api/v2/applications/{app}", self._app)
         self.server = TestServer(app, host="127.0.0.1")
         await self.server.start_server()
         return self.server.port
@@ -80,7 +89,9 @@ def fast(monkeypatch):
     monkeypatch.setattr(tvs.config, "wake_window", 0.8)
     monkeypatch.setattr(tvs.config, "retry_every", 0.1)
     monkeypatch.setattr(tvs, "_send_udp", lambda packet, addr: sent.append((packet, addr)))
-    monkeypatch.setattr(tvs, "lan_base", lambda host: "http://10.0.0.2:50205")
+    async def base(host):
+        return "http://10.0.0.2:50205"
+    monkeypatch.setattr(tvs, "lan_base", base)
     return SimpleNamespace(wol=sent)
 
 
@@ -91,6 +102,7 @@ async def tv(monkeypatch, fast):
     # The test server speaks plain ws; the "secure" leg points at it.
     monkeypatch.setattr(tvs.config, "secure", ("ws", port))
     monkeypatch.setattr(tvs.config, "plain", ("ws", _free_port()))
+    monkeypatch.setattr(tvs.config, "rest", ("http", port))
     yield fake
     await fake.close()
 
@@ -125,6 +137,8 @@ async def test_crud_and_token_never_listed(rig, fast):
                                    {"name": "Bed", "host": "192.168.1.41", "mac": None})
     assert r.status == 200, r.body
     assert r.json()["name"] == "Bed" and r.json()["mac"] is None and r.json()["paired"] is True
+    r = await client(USER).request("PUT", f"/api/tvs/{made['id']}", {"mode_default": None})
+    assert r.status == 200 and r.json()["mode_default"] == "visualizer"
     assert (await client(USER).request("DELETE", f"/api/tvs/{made['id']}")).status == 200
     assert (await client(USER).request("DELETE", f"/api/tvs/{made['id']}")).status == 404
     assert (await client(USER).request("GET", "/api/tvs")).json()["tvs"] == []
@@ -133,7 +147,8 @@ async def test_crud_and_token_never_listed(rig, fast):
 @pytest.mark.parametrize("body", [
     {"name": "", "host": "1.2.3.4"}, {"name": "x", "host": ""},
     {"name": "x", "host": "1.2.3.4/evil"}, {"name": "x", "host": "1.2.3.4", "mac": "zz"},
-    {"name": "x", "host": "1.2.3.4", "mode_default": "nope"}])
+    {"name": "x", "host": "1.2.3.4", "mode_default": "nope"},
+    {"name": "x", "host": "1.2.3.4", "browser_app": "a b/c"}])
 async def test_invalid_tv_is_400(rig, fast, body):
     r = await client(USER).request("POST", "/api/tvs", body)
     assert r.status == 400 and r.json()["error"] == "invalid"
@@ -286,6 +301,8 @@ async def test_unreachable_with_mac_wakes_first_then_gives_up(rig, black_hole, f
     assert took < 2.5          # wake window 0.8 s, injected
     addrs = [a for _, a in fast.wol]
     assert ("255.255.255.255", 9) in addrs and ("127.0.0.255", 9) in addrs
+    # Sent again before every retry, not once.
+    assert addrs.count(("255.255.255.255", 9)) >= 2
 
 
 async def test_wake_then_connect(rig, tv, fast):
@@ -326,6 +343,57 @@ def test_default_display_url():
     tv_ = {"id": "t1"}
     assert (tvs.display_url_for(tv_, "pa_1", "video", "http://10.0.0.2:50205")
             == "http://10.0.0.2:50205/tv?party=pa_1&mode=video")
+    assert (tvs.display_url_for(tv_, "a&b=c d", "cover", "http://h")
+            == "http://h/tv?party=a%26b%3Dc+d&mode=cover")
+
+
+# -- which browser ------------------------------------------------------------
+
+
+async def _show_once(made, party=None):
+    party = party or await _party()
+    r = await client(USER).request("POST", f"/api/tvs/{made['id']}/show", {"party_id": party["id"]})
+    assert r.status == 200, r.body
+    await asyncio.sleep(0.05)
+
+
+async def test_probe_finds_samsung_internet_and_caches_it(rig, tv):
+    tv.internet = True
+    made = await _add()
+    party = await _party()
+    await _show_once(made, party)
+    assert tv.probes == [tvs.SAMSUNG_INTERNET]
+    data = tv.received[0]["params"]["data"]
+    assert data["appId"] == tvs.SAMSUNG_INTERNET and data["action_type"] == "NATIVE_LAUNCH"
+    assert tvs.store().get(made["id"])["browser_app"] == tvs.SAMSUNG_INTERNET
+    await _show_once(made, party)
+    assert len(tv.probes) == 1          # cached: not asked again
+    assert tv.received[1]["params"]["data"]["appId"] == tvs.SAMSUNG_INTERNET
+
+
+async def test_probe_without_samsung_internet_uses_tizen_browser(rig, tv):
+    made = await _add()
+    await _show_once(made)
+    assert tv.probes == [tvs.SAMSUNG_INTERNET]
+    assert tv.received[0]["params"]["data"]["appId"] == "org.tizen.browser"
+    listed = (await client(USER).request("GET", "/api/tvs")).json()["tvs"][0]
+    assert listed["browser_app"] == "org.tizen.browser"
+
+
+async def test_set_browser_app_skips_probe(rig, tv):
+    tv.internet = True
+    made = await _add({"name": "TV", "host": "127.0.0.1", "browser_app": "com.example.web"})
+    await _show_once(made)
+    assert tv.probes == []
+    assert tv.received[0]["params"]["data"]["appId"] == "com.example.web"
+
+
+async def test_probe_failure_falls_back_uncached(rig, tv, monkeypatch):
+    monkeypatch.setattr(tvs.config, "rest", ("http", _free_port()))
+    made = await _add()
+    await _show_once(made)
+    assert tv.received[0]["params"]["data"]["appId"] == "org.tizen.browser"
+    assert tvs.store().get(made["id"])["browser_app"] is None
 
 
 # -- Home Assistant and presets ----------------------------------------------
@@ -360,29 +428,63 @@ async def _preset(tv_id, show="visualizer"):
     return r.json()
 
 
-async def test_preset_start_shows_on_tv(rig, tv):
+async def _settle():
+    """Let the background TV shows finish."""
+    while routes._tv_tasks:
+        await asyncio.gather(*list(routes._tv_tasks))
+
+
+def _results(rig):
+    return [m for m in rig.sent if m.get("type") == "tv_result"]
+
+
+async def test_preset_start_shows_on_tv_in_background(rig, tv):
     made = await _add()
     preset = await _preset(made["id"])
     r = await client(USER).request("POST", f"/api/presets/{preset['id']}/start")
     assert r.status == 200, r.body
     party = r.json()
-    assert "tv_error" not in party
+    assert party["tv"] == "pending" and "tv_error" not in party
+    await _settle()
     await asyncio.sleep(0.05)
     assert tv.received[0]["params"]["data"]["metaTag"].endswith(
         f"/tv?party={party['id']}&mode=visualizer")
+    assert _results(rig) == [{"type": "tv_result", "party": party["id"], "tv_id": made["id"],
+                              "ok": True, "error": None}]
 
 
-async def test_preset_start_survives_tv_failure(rig, black_hole):
+async def test_preset_start_does_not_wait_for_unreachable_tv(rig, black_hole):
     made = await _add()
     preset = await _preset(made["id"])
+    began = time.monotonic()
     r = await client(USER).request("POST", f"/api/presets/{preset['id']}/start")
+    assert time.monotonic() - began < 0.3      # the TV timeout is 0.5 s
     assert r.status == 200, r.body
-    assert r.json()["tv_error"] == "tv_unreachable" and r.json()["speakers"] == ["A", "B"]
+    party = r.json()
+    assert party["tv"] == "pending" and party["speakers"] == ["A", "B"]
+    assert _results(rig) == []
+    await _settle()
+    assert _results(rig) == [{"type": "tv_result", "party": party["id"], "tv_id": made["id"],
+                              "ok": False, "error": "tv_unreachable"}]
 
 
-async def test_ha_preset_start_reports_missing_tv(rig, fast):
+async def test_ha_preset_start_in_background(rig, black_hole):
+    made = await _add()
+    preset = await _preset(made["id"])
+    t = (await _token())["token"]
+    began = time.monotonic()
+    r = await call(t, "POST", f"/api/ha/presets/{preset['id']}/start")
+    assert time.monotonic() - began < 0.3
+    assert r.status == 200, r.body
+    assert r.json()["tv"] == "pending"
+    await _settle()
+    assert [m["error"] for m in _results(rig)] == ["tv_unreachable"]
+
+
+async def test_ha_preset_start_reports_missing_tv_at_once(rig, fast):
     preset = await _preset("gone")
     t = (await _token())["token"]
     r = await call(t, "POST", f"/api/ha/presets/{preset['id']}/start")
     assert r.status == 200, r.body
-    assert r.json()["tv_error"] == "not_found"
+    assert r.json()["tv_error"] == "not_found" and "tv" not in r.json()
+    assert not routes._tv_tasks

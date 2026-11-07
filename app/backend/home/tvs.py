@@ -10,8 +10,14 @@ token that later connects send, so the prompt does not come back.
 Opening TV mode is launching the TV's browser at a URL. Every TV call is
 bounded (``config.timeout``) and fails as ``tv_unreachable`` (nothing
 answered) or ``tv_needs_pairing`` (the TV answered but did not let us in).
-A TV with a MAC is sent a Wake-on-LAN packet first and retried for
-``config.wake_window`` seconds. Uses aiohttp and a UDP socket only.
+A TV with a MAC is sent a Wake-on-LAN packet first, and again before each
+retry, for ``config.wake_window`` seconds. Uses aiohttp and a UDP socket only.
+
+Which browser to launch depends on the model: older Tizen sets have
+``org.tizen.browser``; many 2022+ sets have only Samsung Internet
+(``3201907018807``). Unless the TV record names one (``browser_app``), the
+TV's REST API is asked whether Samsung Internet is installed, and the answer
+is kept on the record.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import AsyncIterator
+from urllib.parse import urlencode
 
 import aiohttp
 from yarl import URL
@@ -40,6 +47,8 @@ from .store import home_dir, read_json, write_json
 APP_NAME = "Sonora Home"
 CHANNEL = "/api/v2/channels/samsung.remote.control"
 BROWSER = "org.tizen.browser"
+SAMSUNG_INTERNET = "3201907018807"
+_APP_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 NAME_LIMIT = 60
 _HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}")
 _MAC = re.compile(r"[0-9a-f]{12}")
@@ -54,6 +63,7 @@ class Config:
     retry_every: float = 1.0
     secure: tuple[str, int] = ("wss", 8002)
     plain: tuple[str, int] = ("ws", 8001)
+    rest: tuple[str, int] = ("http", 8001)   # the TV's app-info REST API
 
 
 config = Config()
@@ -100,16 +110,24 @@ def _normalize(body: dict, old: dict | None = None) -> dict:
     if not _HOST.fullmatch(host):
         raise ValueError("host must be an IP address or a host name")
     mac = _mac(body["mac"]) if "mac" in body else old.get("mac")
-    mode = body.get("mode_default", old.get("mode_default") or "cover")
+    mode = body.get("mode_default")
+    if mode is None:                        # missing or null: keep the old one
+        mode = old.get("mode_default") or "cover"
     if mode not in TV_SHOWS:
         raise ValueError("mode_default must be video, visualizer or cover")
-    return {"name": name, "host": host, "mac": mac, "mode_default": mode}
+    # null or "" clears it, so the next show asks the TV again.
+    app = body["browser_app"] if "browser_app" in body else old.get("browser_app")
+    app = str(app).strip() if app else None
+    if app is not None and not _APP_ID.fullmatch(app):
+        raise ValueError("browser_app must be an app id")
+    return {"name": name, "host": host, "mac": mac, "mode_default": mode, "browser_app": app}
 
 
 def public(tv: dict) -> dict:
     """A TV as the interface sees it: never the token."""
     return {"id": tv["id"], "name": tv["name"], "host": tv["host"], "mac": tv.get("mac"),
-            "mode_default": tv.get("mode_default", "cover"), "paired": bool(tv.get("token"))}
+            "mode_default": tv.get("mode_default", "cover"), "browser_app": tv.get("browser_app"),
+            "paired": bool(tv.get("token"))}
 
 
 class Tvs:
@@ -155,13 +173,16 @@ class Tvs:
             write_json(self.path, {"tvs": kept})
         return True
 
-    def set_token(self, tv_id: str, token: str) -> None:
+    def set_fields(self, tv_id: str, **fields) -> None:
         with self._lock:
             items = self._load()
             for t in items:
                 if t["id"] == tv_id:
-                    t["token"] = token
+                    t.update(fields)
             write_json(self.path, {"tvs": items})
+
+    def set_token(self, tv_id: str, token: str) -> None:
+        self.set_fields(tv_id, token=token)
 
 
 _store: Tvs | None = None
@@ -179,7 +200,7 @@ def store() -> Tvs:
 # -- what the TV opens --------------------------------------------------------
 
 
-def lan_base(host: str) -> str:
+async def lan_base(host: str) -> str:
     """Sonora's address as a TV on the LAN reaches it: the address speakers
     already use (the event callback), else the route toward ``host``; the
     same choice ``media.media_url`` makes for speakers."""
@@ -189,7 +210,7 @@ def lan_base(host: str) -> str:
     ip = getattr(getattr(controller, "events", None), "_callback_ip", None)
     if not ip:
         try:
-            ip = events.local_ip_for(host)
+            ip = await asyncio.to_thread(events.local_ip_for, host)
         except OSError:
             raise _unreachable() from None
     return f"http://{ip}:{settings.port}"
@@ -198,13 +219,36 @@ def lan_base(host: str) -> str:
 def display_url_for(tv: dict, party_id: str, mode: str, base_url: str) -> str:
     """The page a TV opens for ``party_id`` in ``mode``. One function, so it
     can become a per-TV display link without touching anything else."""
-    return f"{base_url}/tv?party={party_id}&mode={mode}"
+    return f"{base_url}/tv?{urlencode({'party': party_id, 'mode': mode})}"
 
 
-def launch_message(url: str) -> dict:
+def launch_message(url: str, app: str = BROWSER) -> dict:
+    # NATIVE_LAUNCH with the URL as metaTag is what opens org.tizen.browser.
+    # Samsung Internet gets the same message; some firmwares may want
+    # action_type DEEP_LINK for it instead (unverified on real sets).
     return {"method": "ms.channel.emit", "params": {
         "event": "ed.apps.launch", "to": "host",
-        "data": {"appId": BROWSER, "action_type": "NATIVE_LAUNCH", "metaTag": url}}}
+        "data": {"appId": app, "action_type": "NATIVE_LAUNCH", "metaTag": url}}}
+
+
+async def browser_app(session: aiohttp.ClientSession, tv: dict) -> str:
+    """The browser to launch: the record's ``browser_app``, else Samsung
+    Internet when the TV's REST API says it is installed (200), else
+    ``org.tizen.browser``. A definite answer is kept on the record; a TV
+    that does not answer gets the old browser this time and is asked again
+    next time."""
+    if tv.get("browser_app"):
+        return tv["browser_app"]
+    scheme, port = config.rest
+    url = f"{scheme}://{tv['host']}:{port}/api/v2/applications/{SAMSUNG_INTERNET}"
+    try:
+        async with asyncio.timeout(config.timeout):
+            async with session.get(url, ssl=False) as response:
+                found = SAMSUNG_INTERNET if response.status == 200 else BROWSER
+    except (aiohttp.ClientError, OSError, TimeoutError, ValueError):
+        return BROWSER
+    store().set_fields(tv["id"], browser_app=found)
+    return found
 
 
 # -- Wake-on-LAN --------------------------------------------------------------
@@ -308,13 +352,13 @@ async def _try(session, tv: dict, wait: float):
 @contextlib.asynccontextmanager
 async def channel(tv: dict, wait: float) -> AsyncIterator:
     """An admitted socket to ``tv`` (waking it first when it has a MAC);
-    yields ``(ws, token)``. A new token is stored before the body runs."""
+    yields ``(session, ws, token)``. A new token is stored before the body runs."""
     async with aiohttp.ClientSession() as session:
         if tv.get("mac"):
-            wake(tv["mac"], tv["host"])
             loop = asyncio.get_running_loop()
             deadline = loop.time() + config.wake_window
             while True:
+                wake(tv["mac"], tv["host"])     # again each try: UDP may be lost
                 try:
                     ws, token = await _try(session, tv, wait)
                     break
@@ -327,7 +371,7 @@ async def channel(tv: dict, wait: float) -> AsyncIterator:
         try:
             if token and token != tv.get("token"):
                 store().set_token(tv["id"], token)
-            yield ws, token
+            yield session, ws, token
         finally:
             await ws.close()
 
@@ -343,22 +387,30 @@ async def pair(tv_id: str) -> dict:
     """Connect, so the TV shows its allow prompt, and keep the token it
     gives. A TV on the plain port gives none and needs none."""
     tv = _find(tv_id)
-    async with channel(tv, config.pair_wait) as (_, token):
+    async with channel(tv, config.pair_wait) as (_, _, token):
         pass
     return {"ok": True, "paired": bool(token or tv.get("token"))}
 
 
-async def show(tv_id: str, party_id: str, mode: str | None = None) -> dict:
-    """Open TV mode for ``party_id`` on the TV's browser."""
+def prepare(tv_id: str, mode: str | None) -> tuple[dict, str]:
+    """The TV and the mode to show, or the instant refusals: ``not_found``,
+    ``invalid``. Nothing touches the network."""
     tv = _find(tv_id)
     mode = mode or tv.get("mode_default") or "cover"
     if mode not in TV_SHOWS:
         raise TvError(400, "invalid", "mode must be video, visualizer or cover")
-    url = display_url_for(tv, party_id, mode, lan_base(tv["host"]))
-    async with channel(tv, config.timeout) as (ws, _):
+    return tv, mode
+
+
+async def show(tv_id: str, party_id: str, mode: str | None = None) -> dict:
+    """Open TV mode for ``party_id`` on the TV's browser."""
+    tv, mode = prepare(tv_id, mode)
+    url = display_url_for(tv, party_id, mode, await lan_base(tv["host"]))
+    async with channel(tv, config.timeout) as (session, ws, _):
+        app = await browser_app(session, tv)
         try:
             async with asyncio.timeout(config.timeout):
-                await ws.send_str(json.dumps(launch_message(url)))
+                await ws.send_str(json.dumps(launch_message(url, app)))
         except (aiohttp.ClientError, OSError, TimeoutError, ConnectionError):
             raise _unreachable() from None
     return {"ok": True, "tv_id": tv_id, "party_id": party_id, "mode": mode}
