@@ -117,7 +117,12 @@ def _catch_up(found: PartyEngine) -> None:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    task = loop.create_task(found.on_state({"type": "snapshot"}))
+    async def read() -> None:
+        try:
+            await found.on_state({"type": "snapshot"})
+        except Exception:                              # noqa: BLE001 - logged, never raised
+            log.exception("parties: the first read of the speakers failed")
+    task = loop.create_task(read())
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
 

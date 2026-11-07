@@ -120,6 +120,12 @@ class Party:
     #: The queue and attribution kept while the party has no speakers:
     #: ``{"items": [{uri, metadata}], "added": {uri: [adders]}}``.
     saved_queue: dict | None = None
+    #: Whether the lead has been seen playing what the party put on. Only a
+    #: party seen so is let go when its lead turns to something else, so a
+    #: report still on its way from before the party's own change is not
+    #: read as someone else's. Kept in the file: a party read back after a
+    #: restart is only as seen as it was.
+    seen: bool = False
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Party":
@@ -130,13 +136,15 @@ class Party:
                    state="paused" if raw.get("state") == "paused" else "playing",
                    preset_id=raw.get("preset_id"), created=float(raw.get("created") or 0.0),
                    own_source=str(raw["own_source"]) if raw.get("own_source") else None,
-                   saved_queue=raw["saved_queue"] if isinstance(raw.get("saved_queue"), dict) else None)
+                   saved_queue=raw["saved_queue"] if isinstance(raw.get("saved_queue"), dict) else None,
+                   seen=raw.get("seen") is True)
 
 
 def _public(party: Party) -> dict:
     """A party as it is shown: the kept queue is counted, not listed."""
     out = asdict(party)
     kept = out.pop("saved_queue", None)
+    out.pop("seen", None)
     out["kept_queue"] = len((kept or {}).get("items") or [])
     return out
 
@@ -188,14 +196,7 @@ class PartyEngine:
         #: topology events Sonora's own regrouping brings are not read as
         #: another app's doing.
         self._lock = asyncio.Lock()
-        #: Parties whose lead has been seen playing what the party put on.
-        #: Only those are let go when it turns to something else, so a
-        #: report still on its way from before the party's own change is not
-        #: read as someone else's. Parties read back from the file are taken
-        #: as seen: nothing of the engine's is on its way then.
-        self._seen: set[str] = set()
         self._load()
-        self._seen = set(self._parties)
 
     # -- persistence -----------------------------------------------------------
 
@@ -327,19 +328,24 @@ class PartyEngine:
         except KeyError:
             return False
 
-    async def _keep_queue(self, record: dict | None, lead: str) -> None:
+    async def _keep_queue(self, record: dict | None, lead: str) -> bool:
         """Write the party lead's own queue into its record when the scene
         did not (``scenes.apply`` reads a queue only when it replaces it).
         Guests fill the lead's queue during the party; ending it must hand
         back the queue that was there, and ``revert`` restores a queue held
-        in the record even when the source is still that queue."""
+        in the record even when the source is still that queue. Says
+        whether the record now holds the lead's queue."""
         room = ((record or {}).get("rooms") or {}).get(lead)
-        if room is None or room.get("queue") is not None:
-            return
+        if room is None:
+            return False
+        if room.get("queue") is not None:
+            return True
         try:
             room["queue"] = await scenes._queue_items(self._commands, self._controller.zone(lead).host)
         except Exception as exc:                      # noqa: BLE001 - the party starts all the same
             log.info("party: the queue of %s could not be read: %s", lead, exc)
+            return False
+        return True
 
     def _host(self, zone: str) -> str | None:
         try:
@@ -364,14 +370,22 @@ class PartyEngine:
             return
         party.saved_queue = {"items": items, "added": copy.deepcopy(self._added.get(party.id, {}))}
 
-    async def _put_back(self, party: Party, zone: str, record: dict | None) -> None:
+    async def _put_back(self, party: Party, zone: str, record: dict | None, snapshot: bool = True) -> None:
         """``zone`` now leads a party that had no speakers: put the queue the
         party kept on it, so the guests' songs come back. With no queue
-        kept, the party takes what ``zone`` has loaded as its own."""
+        kept, the party takes what ``zone`` has loaded as its own. Without
+        ``snapshot`` (``zone``'s own queue could not be written into its way
+        back) its queue is not replaced, and the party keeps its queue for
+        a later speaker."""
         kept = party.saved_queue or {}
         items = kept.get("items") or []
-        party.saved_queue = None
-        self._seen.discard(party.id)
+        party.seen = False
+        if items and not snapshot:
+            log.info("party %r: %s's queue could not be written down; the party's queue is not put on it",
+                     party.name, zone)
+            items = []
+        else:
+            party.saved_queue = None
         if not items:
             room = ((record or {}).get("rooms") or {}).get(zone) or {}
             party.own_source = (room.get("transport") or {}).get("media_uri") or None
@@ -425,7 +439,7 @@ class PartyEngine:
             party.volumes.pop(zone, None)
         if not party.speakers:
             party.state = "paused"
-            self._seen.discard(party.id)
+            party.seen = False
 
     async def _release(self, plans: dict[str, tuple[str, Any]]) -> dict:
         """Carry out where each leaving speaker goes: rejoin its party's lead,
@@ -576,7 +590,6 @@ class PartyEngine:
                 self._drop_entries(zone, party_id)
             del self._parties[party_id]
             self._added.pop(party_id, None)
-            self._seen.discard(party_id)
             self._save()
             await self._fire_end(party_id)
             report = await self._release(plans)
@@ -617,8 +630,8 @@ class PartyEngine:
                 except Exception as exc:              # noqa: BLE001 - reported by the topology that follows
                     log.info("party %r: %s could not join: %s", party.name, zone, exc)
             else:
-                await self._keep_queue(record, zone)
-                await self._put_back(party, zone, record)
+                snapshot = await self._keep_queue(record, zone)
+                await self._put_back(party, zone, record, snapshot)
             party.speakers.append(zone)
             party.state = "playing"
             self._push(zone, party_id, record)
@@ -749,9 +762,11 @@ class PartyEngine:
             if uri is None:
                 continue
             if self._plays_its_own(party, uri):
-                self._seen.add(party.id)
+                if not party.seen:
+                    party.seen = True
+                    changed = True
                 continue
-            if party.id not in self._seen:
+            if not party.seen:
                 continue
             # Something else was put on the party's speakers: they leave it.
             lead = party.speakers[0]
@@ -761,7 +776,7 @@ class PartyEngine:
             party.speakers = []
             party.volumes = {}
             party.state = "paused"
-            self._seen.discard(party.id)
+            party.seen = False
             keeping.append((party, lead))
             changed = True
         if notices or changed:

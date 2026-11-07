@@ -446,3 +446,16 @@ async def test_engine_reads_the_speakers_once_it_is_made(rig, tmp_path):
     await asyncio.gather(*list(routes._tasks))
     assert {"type": "party_notice", "party": pid, "zone": "B", "event": "left"} in rig.sent
     assert routes.engine().get(pid)["speakers"] == ["A"]
+
+
+async def test_engine_first_read_failure_is_logged(rig, monkeypatch, caplog):
+    import asyncio
+    from backend.home.parties import PartyEngine
+
+    async def broken(self, message):
+        raise RuntimeError("controller hiccup")
+    monkeypatch.setattr(PartyEngine, "on_state", broken)
+    r = await client(USER).request("GET", "/api/parties")
+    assert r.status == 200
+    await asyncio.gather(*list(routes._tasks))
+    assert any("first read of the speakers failed" in rec.getMessage() for rec in caplog.records)

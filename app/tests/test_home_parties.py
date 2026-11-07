@@ -572,13 +572,32 @@ def test_a_quiet_party_owns_what_its_lead_had_loaded(rig, monkeypatch):
     assert [n["zone"] for n in rig.notices] == ["A"]
 
 
-def test_a_party_read_back_after_a_restart_follows_reality(rig):
+def test_a_party_seen_before_a_restart_follows_reality(rig):
+    import json
     engine = rig.engine()
     party = run(engine.start(name="One", speakers=["A"], by=ANA))
+    _plays(rig, "A", "x-rincon-queue:A#0")
+    run(engine.on_state({"type": "zone"}))
+    assert json.loads(rig.path.read_text())["parties"][0]["seen"] is True
     _plays(rig, "A", "x-sonosapi-stream:s1")          # played while Sonora was down
     again = rig.engine()
     run(again.on_state({"type": "snapshot"}))
     assert rig.notices == [{"type": "party_notice", "party": party["id"], "zone": "A", "event": "left"}]
+
+
+def test_a_party_never_seen_is_not_dropped_after_a_restart(rig):
+    import json
+    engine = rig.engine()
+    run(engine.start(name="One", speakers=["A"], by=ANA))
+    data = json.loads(rig.path.read_text())
+    assert data["parties"][0]["seen"] is False
+    # an older file has no flag at all: not seen either
+    del data["parties"][0]["seen"]
+    rig.path.write_text(json.dumps(data))
+    _plays(rig, "A", "x-sonosapi-stream:s1")          # its own source was never matched
+    again = rig.engine()
+    run(again.on_state({"type": "snapshot"}))
+    assert rig.notices == [] and again.list()[0]["speakers"] == ["A"]
 
 
 # -- a party with no speakers keeps its queue ---------------------------------
@@ -673,3 +692,21 @@ def test_corrupt_file_is_set_aside_and_writes_are_private(rig):
     run(engine.start(name="One", speakers=["A"], by=ANA))
     assert os.stat(rig.path).st_mode & 0o777 == 0o600
     assert not list(rig.path.parent.glob("*.tmp"))
+
+
+def test_kept_queue_is_not_put_on_a_speaker_whose_queue_could_not_be_written_down(rig, monkeypatch):
+    queue = [{"uri": "x-file:guest", "metadata": "<b/>"}]
+    put = _with_queues(rig, monkeypatch, {"A": queue})
+    engine = rig.engine()
+    party = run(engine.start(name="One", speakers=["A"], by=ANA))
+    run(engine.start(name="Two", speakers=["A"], by=ANA, take=True))
+    assert engine.get(party["id"])["kept_queue"] == 1
+
+    async def broken(commands, host):
+        raise OSError("speaker did not answer")
+    monkeypatch.setattr(scenes, "_queue_items", broken)
+    rig.commands.calls.clear()
+    run(engine.add_speaker(party["id"], "C", ANA))
+    assert put == [] and not any(c[0] in ("set_source", "play") for c in rig.commands.calls)
+    listed = engine.get(party["id"])
+    assert listed["speakers"] == ["C"] and listed["kept_queue"] == 1   # kept for later
