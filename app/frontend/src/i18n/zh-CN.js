@@ -1404,4 +1404,10 @@ export default {
   'home.display.delete': 'Delete',
   'home.display.deleteTitle': 'Delete {name}?',
   'home.display.deleteHelp': 'Screens using this link stop working.',
+  'home.visualizer.label': 'Music visualizer',
+  'home.visualizer.loading': 'Loading the visualizer',
+  'home.visualizer.unsupported': 'This screen cannot show the visualizer.',
+  'home.visualizer.useMic': 'Use microphone',
+  'home.visualizer.micDenied': 'The microphone is not available.',
+  'home.visualizer.nextPreset': 'Next preset',
 }
