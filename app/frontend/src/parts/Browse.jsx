@@ -2168,7 +2168,7 @@ function leaned(title, term) {
   )
 }
 
-function isQueueable(item) {
+export function isQueueable(item) {
   // An audiobook never goes into the queue: the app hands the book to the
   // player (SetAVTransportURI on its container), which plays the chapters
   // in order and resumes; queueing it expanded 21 chapters into the queue
