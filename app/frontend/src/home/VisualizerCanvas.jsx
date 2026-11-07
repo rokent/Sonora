@@ -41,8 +41,10 @@ const BACKOFF_MIN = 2000
 const BACKOFF_MAX = 30000
 const SLOW_MAX = 60000
 const UNKNOWN_PARTY_WAIT = 15000
-/** A socket open this long counts as healthy even with no frame yet. */
+/** A socket counts as healthy (its backoff starts over) once it has been
+ * open this long, or has delivered this many frames (one second's worth). */
 const HEALTHY_OPEN = 10000
+const HEALTHY_FRAMES = 30
 
 // The server said it has no ffmpeg: no page needs to ask again until reload.
 let exactDisabled = false
@@ -107,19 +109,20 @@ export default function VisualizerCanvas({
     let timer = null
     let stopped = false
     // backoff: for drops in general, back to the minimum only once the
-    // socket proved itself (a frame arrived, or it stayed open 10 s). slow:
+    // socket proved itself (30 frames arrived, or it stayed open 10 s), so
+    // one that sends a frame and drops does not retry every 2 s. slow:
     // for 4008, which a healthy-looking socket can hit again and again, so
     // nothing resets it short of the effect starting over.
     let backoff = BACKOFF_MIN
     let slow = BACKOFF_MIN
     const connect = () => {
       let openedAt = 0
-      let gotFrame = false
+      let frames = 0
       socket = new WebSocket(socketUrl(`/ws/visual?party=${encodeURIComponent(partyId)}`))
       socket.onopen = () => { openedAt = Date.now(); setExactLive(true) }
       socket.onmessage = (event) => {
         const frame = decodeFrame(event.data)
-        if (frame && !gotFrame) { gotFrame = true; backoff = BACKOFF_MIN }
+        if (frame && ++frames === HEALTHY_FRAMES) backoff = BACKOFF_MIN
         queue.push(frame)
       }
       socket.onclose = (event) => {

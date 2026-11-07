@@ -45,10 +45,15 @@ function fn(body, where) {
 
 // The same fields loadPreset() would have built, in the same shapes: an empty
 // pixel or point equation is '' (the renderer tests for that), everything
-// else a function. Like loadPreset(), a shape or wave that is not enabled
-// (Butterchurn's default for `enabled` is 0) gets no functions. The *_str
-// source is dropped.
-const enabled = (part) => (part.baseVals?.enabled ?? 0) !== 0
+// else a function. The *_str source is dropped.
+//
+// A shape or wave whose `enabled` is 0 gets no functions: loadPreset() makes
+// none for it and the renderer never calls them. One with no `enabled` at
+// all (24 waves in the pack) does get them. Butterchurn 2.6.7 would not
+// draw it either -- loadPreset() fills in its default, `enabled: 0`, before
+// it looks -- but compiling those few keeps this module from depending on
+// that default, at the cost of some unused functions.
+const enabled = (part) => part.baseVals?.enabled !== 0
 
 function presetSource(name, preset) {
   const strip = (obj) => Object.fromEntries(Object.entries(obj).filter(([k]) => !k.endsWith('_eqs_str')))
