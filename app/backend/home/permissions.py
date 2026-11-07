@@ -58,6 +58,8 @@ GUEST: list[tuple[str, re.Pattern]] = [
     _rule("GET", rf"/api/parties/{_SEG}/queue"),
     _rule("POST", rf"/api/parties/{_SEG}/join"),
     _rule("POST", rf"/api/parties/{_SEG}/queue"),
+    _rule("POST", rf"/api/parties/{_SEG}/youtube"),
+    _rule("GET", r"/api/youtube/search"),
     _rule("DELETE", rf"/api/parties/{_SEG}/queue/{_SEG}"),
     _rule("POST", rf"/api/parties/{_SEG}/transport/(play|pause|next|previous)"),
     _rule("POST", rf"/api/parties/{_SEG}/volume"),

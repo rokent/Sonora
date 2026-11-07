@@ -36,6 +36,8 @@ _TTL = 24 * 3600.0
 _TOUCH_WRITE = 600.0
 _KEY = re.compile(r"[A-Za-z0-9_-]{16,64}")
 _PASSED = ("Content-Length", "Content-Range", "Accept-Ranges")
+#: The only Range form relayed (one range); anything else is ignored.
+_RANGE = re.compile(r"bytes=\d*-\d*")
 
 
 class MediaKeys:
@@ -66,6 +68,8 @@ class MediaKeys:
         self._written = {k: v["used"] for k, v in self._keys.items()}
 
     def issue(self, video_id: str) -> str:
+        if not youtube._ID.fullmatch(video_id or ""):
+            raise ValueError(f"not a YouTube video id: {video_id!r}")
         key = secrets.token_urlsafe(16)
         with self._lock:
             self._purge()
@@ -179,7 +183,10 @@ async def media(key: str, request: Request) -> Response:
         return _error(404, "not_found")
     method = "HEAD" if request.method == "HEAD" else "GET"
     try:
-        upstream = await _open(method, video_id, request.headers.get("range"))
+        rng = request.headers.get("range")
+        if rng is not None and not _RANGE.fullmatch(rng.strip()):
+            rng = None
+        upstream = await _open(method, video_id, rng.strip() if rng else None)
     except youtube.YouTubeError:
         return _error(502, "youtube_failed")
     except (aiohttp.ClientError, TimeoutError, main.fetchguard.Refused):
@@ -190,6 +197,8 @@ async def media(key: str, request: Request) -> Response:
 
     passed = {name: upstream.headers[name] for name in _PASSED
               if name in upstream.headers}
+    if upstream.status == 416:
+        passed.pop("Content-Length", None)    # the body is not relayed
     if method == "HEAD" or upstream.status == 416:
         upstream.release()
         return Response(status_code=upstream.status, headers=passed,
