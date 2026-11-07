@@ -54,6 +54,7 @@ GUEST: list[tuple[str, re.Pattern]] = [
     _rule("GET", r"/api/state"),
     _rule("GET", r"/ws"),
     _rule("GET", r"/party(/.*)?"),                # the party page shell
+    _rule("GET", r"/api/home/config"),
     _rule("GET", r"/api/parties"),
     _rule("GET", rf"/api/parties/{_SEG}/queue"),
     _rule("POST", rf"/api/parties/{_SEG}/join"),

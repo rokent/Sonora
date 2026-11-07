@@ -11,7 +11,7 @@ import inspect
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import Response
 
-from . import auth_routes, permissions
+from . import auth_routes, config_routes, permissions
 
 #: Pages of Sonora Home's own that the interface routes by path: they are the
 #: same page shell Sonora serves at ``/``.
@@ -56,4 +56,5 @@ def install(app: FastAPI) -> None:
     """
     app.middleware("http")(permissions.guard)
     app.include_router(auth_routes.router)
+    app.include_router(config_routes.router)
     app.include_router(pages)

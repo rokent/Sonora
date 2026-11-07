@@ -32,6 +32,14 @@ LABEL org.opencontainers.image.title="Sonora" \
 RUN useradd --system --uid 10001 --create-home --home-dir /home/sonora sonora \
  && mkdir -p /data && chown sonora:sonora /data
 
+# yt-dlp needs a JavaScript runtime to solve YouTube's challenges: the same
+# Node the frontend builds with (Debian glibc, so it runs on python-slim once
+# libatomic1, the one library the slim image lacks, is there).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libatomic1 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=web /usr/local/bin/node /usr/local/bin/node
+
 COPY --from=deps /venv /venv
 COPY --from=deps /src/backend /app/backend
 COPY --from=web  /src/frontend/dist /app/frontend/dist
