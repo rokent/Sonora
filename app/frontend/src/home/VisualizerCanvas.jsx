@@ -10,9 +10,14 @@
 //   2. microphone: only on a secure page, after a tap on "Use microphone";
 //   3. generic: a slow synthetic waveform pulsing at 120 BPM.
 // While the speaker is paused (and no microphone listens) it is fed silence.
+//
+// A lost WebGL context (a TV browser reclaiming the GPU, a driver reset) is
+// kept restorable (preventDefault on webglcontextlost); when the browser
+// restores it the canvas is replaced and Butterchurn built again on it. The
+// audio context, and with it a microphone already granted, lives across that.
 import React, { useEffect, useRef, useState } from 'react'
 import butterchurnModule from 'butterchurn'
-import presets from 'virtual:butterchurn-presets'
+import buildPresets from 'virtual:butterchurn-presets'
 import { useI18n } from '../i18n/index.jsx'
 import { request } from '../lib/api.js'
 import { socketUrl } from '../lib/base.js'
@@ -27,10 +32,25 @@ const PRESET_SECONDS = 30
 const BLEND_SECONDS = 2.7
 /** Drawing size cap: a TV at 4K still renders at most this wide. */
 const MAX_WIDTH = 1920
-/** Close codes after which the socket is not tried again for this party. */
-const CLOSE_DISABLED = 4001
-const CLOSE_UNKNOWN_PARTY = 4004
-const CLOSE_NOT_ALLOWED = 1008
+/** /ws/visual close codes (backend home/analysis.py). */
+const CLOSE_DISABLED = 4001      // no ffmpeg: never tried again this session
+const CLOSE_UNKNOWN_PARTY = 4004 // looked for again slowly
+const CLOSE_TOO_SLOW = 4008      // retried with its own, growing backoff
+const CLOSE_NOT_ALLOWED = 1008   // not tried again for this party
+const BACKOFF_MIN = 2000
+const BACKOFF_MAX = 30000
+const SLOW_MAX = 60000
+const UNKNOWN_PARTY_WAIT = 15000
+/** A socket open this long counts as healthy even with no frame yet. */
+const HEALTHY_OPEN = 10000
+
+// The server said it has no ffmpeg: no page needs to ask again until reload.
+let exactDisabled = false
+
+// The presets, built once Butterchurn has put its helpers on window (it does
+// so when its module is evaluated, before any of this runs).
+let presetsCache = null
+const presetsNow = () => presetsCache || (presetsCache = buildPresets(window))
 
 function shuffled(list) {
   const out = list.slice()
@@ -54,11 +74,14 @@ export default function VisualizerCanvas({
   const vizRef = useRef(null)
   const audioRef = useRef(null)
   const micRef = useRef(null)
+  const micPending = useRef(false)
+  const mounted = useRef(false)
   const queueRef = useRef(null)
   if (!queueRef.current) queueRef.current = createFrameQueue()
   const nextRef = useRef(() => {})
+  const [generation, setGeneration] = useState(0) // a new canvas after a context restore
   const [unsupported, setUnsupported] = useState(false)
-  const [exactOff, setExactOff] = useState(false)
+  const [exactOff, setExactOff] = useState(exactDisabled)
   const [exactLive, setExactLive] = useState(false)
   const [mic, setMic] = useState('off') // off | on | denied
 
@@ -83,20 +106,40 @@ export default function VisualizerCanvas({
     let socket = null
     let timer = null
     let stopped = false
-    let backoff = 2000
+    // backoff: for drops in general, back to the minimum only once the
+    // socket proved itself (a frame arrived, or it stayed open 10 s). slow:
+    // for 4008, which a healthy-looking socket can hit again and again, so
+    // nothing resets it short of the effect starting over.
+    let backoff = BACKOFF_MIN
+    let slow = BACKOFF_MIN
     const connect = () => {
+      let openedAt = 0
+      let gotFrame = false
       socket = new WebSocket(socketUrl(`/ws/visual?party=${encodeURIComponent(partyId)}`))
-      socket.onopen = () => { backoff = 2000; setExactLive(true) }
-      socket.onmessage = (event) => queue.push(decodeFrame(event.data))
+      socket.onopen = () => { openedAt = Date.now(); setExactLive(true) }
+      socket.onmessage = (event) => {
+        const frame = decodeFrame(event.data)
+        if (frame && !gotFrame) { gotFrame = true; backoff = BACKOFF_MIN }
+        queue.push(frame)
+      }
       socket.onclose = (event) => {
         setExactLive(false)
         queue.clear()
         if (stopped) return
-        if (event.code === CLOSE_DISABLED) { setExactOff(true); return }
+        if (event.code === CLOSE_DISABLED) { exactDisabled = true; setExactOff(true); return }
         if (event.code === CLOSE_NOT_ALLOWED) return
-        // An unknown party may be one about to start: look again slowly.
-        const wait = event.code === CLOSE_UNKNOWN_PARTY ? 15000 : backoff
-        backoff = Math.min(30000, backoff * 2)
+        let wait
+        if (event.code === CLOSE_TOO_SLOW) {
+          wait = slow
+          slow = Math.min(SLOW_MAX, slow * 2)
+        } else if (event.code === CLOSE_UNKNOWN_PARTY) {
+          // A party about to start: look again slowly.
+          wait = UNKNOWN_PARTY_WAIT
+        } else {
+          if (openedAt && Date.now() - openedAt > HEALTHY_OPEN) backoff = BACKOFF_MIN
+          wait = backoff
+          backoff = Math.min(BACKOFF_MAX, backoff * 2)
+        }
         timer = setTimeout(connect, wait)
       }
     }
@@ -113,17 +156,32 @@ export default function VisualizerCanvas({
   // A new track: whatever was queued belongs to the old one.
   useEffect(() => { queueRef.current.clear() }, [trackUri])
 
-  // Butterchurn, its presets, and the animation loop.
+  // The audio context, for the life of the component: Butterchurn needs one,
+  // and a microphone hangs off it.
+  useEffect(() => {
+    mounted.current = true
+    const Context = window.AudioContext || window.webkitAudioContext
+    const audio = Context ? new Context() : null
+    audioRef.current = audio
+    return () => {
+      mounted.current = false
+      const mine = micRef.current
+      micRef.current = null
+      if (mine) mine.stream.getTracks().forEach((track) => { track.onended = null; track.stop() })
+      audioRef.current = null
+      if (audio) audio.close().catch(() => {})
+    }
+  }, [])
+
+  // Butterchurn on the current canvas, its presets, and the animation loop.
   useEffect(() => {
     const canvas = canvasRef.current
     const wrap = wrapRef.current
+    const audio = audioRef.current
     if (!canvas || !wrap) return undefined
-    const Context = window.AudioContext || window.webkitAudioContext
-    if (!webgl2Supported() || !Context || !butterchurn) { setUnsupported(true); return undefined }
+    if (!webgl2Supported() || !audio || !butterchurn) { setUnsupported(true); return undefined }
 
     let viz
-    const audio = new Context()
-    audioRef.current = audio
     const size = () => {
       const ratio = Math.min(window.devicePixelRatio || 1, 2)
       let width = Math.max(1, Math.round(wrap.clientWidth * ratio))
@@ -131,17 +189,20 @@ export default function VisualizerCanvas({
       if (width > MAX_WIDTH) { height = Math.round(height * MAX_WIDTH / width); width = MAX_WIDTH }
       return { width, height }
     }
+    let presets
     try {
+      presets = presetsNow()
       const { width, height } = size()
       canvas.width = width
       canvas.height = height
       viz = butterchurn.createVisualizer(audio, canvas, { width, height, pixelRatio: 1 })
     } catch {
       setUnsupported(true)
-      audio.close().catch(() => {})
       return undefined
     }
     vizRef.current = viz
+    // A microphone granted before a context restore carries on.
+    if (micRef.current) { try { viz.connectAudio(micRef.current.source) } catch { /* generic */ } }
 
     const names = shuffled(Object.keys(presets))
     let index = 0
@@ -169,7 +230,9 @@ export default function VisualizerCanvas({
     const levels = new Uint8Array(LEVELS_SAMPLES)
     const audioLevels = { timeByteArray: levels, timeByteArrayL: levels, timeByteArrayR: levels }
     let raf = 0
+    let lost = false
     const draw = () => {
+      if (lost) return
       raf = requestAnimationFrame(draw)
       const now = live.current
       let frame = null
@@ -187,45 +250,74 @@ export default function VisualizerCanvas({
           else silence(levels)
           viz.render({ audioLevels })
         }
-      } catch { /* a lost context: the next frame tries again */ }
+      } catch { /* one bad frame; the next is drawn as usual */ }
     }
     raf = requestAnimationFrame(draw)
 
+    // Lost: stop drawing and ask for the context back. Restored: the
+    // renderer's textures and programs are gone, so build it all again on a
+    // fresh canvas (a new key) rather than patch this one up.
+    const onLost = (event) => {
+      event.preventDefault()
+      lost = true
+      cancelAnimationFrame(raf)
+      clearInterval(cycle)
+    }
+    const onRestored = () => setGeneration((g) => g + 1)
+    canvas.addEventListener('webglcontextlost', onLost)
+    canvas.addEventListener('webglcontextrestored', onRestored)
+
     return () => {
+      canvas.removeEventListener('webglcontextlost', onLost)
+      canvas.removeEventListener('webglcontextrestored', onRestored)
       cancelAnimationFrame(raf)
       clearInterval(cycle)
       observer.disconnect()
       nextRef.current = () => {}
-      const mine = micRef.current
-      if (mine) {
-        try { viz.disconnectAudio(mine.source) } catch { /* gone */ }
-        mine.stream.getTracks().forEach((track) => track.stop())
-        micRef.current = null
-      }
+      if (micRef.current) { try { viz.disconnectAudio(micRef.current.source) } catch { /* gone */ } }
       vizRef.current = null
-      audioRef.current = null
-      audio.close().catch(() => {})
       // Free the GPU now rather than whenever the canvas is collected: a TV
       // browser has little to spare.
-      try { canvas.getContext('webgl2')?.getExtension('WEBGL_lose_context')?.loseContext() } catch { /* fine */ }
+      if (!lost) {
+        try { canvas.getContext('webgl2')?.getExtension('WEBGL_lose_context')?.loseContext() } catch { /* fine */ }
+      }
     }
-  }, [])
+  }, [generation])
 
-  async function startMicrophone() {
-    const viz = vizRef.current
+  // The microphone ended from outside (unplugged, permission revoked): back
+  // to the generic animation, and the button back for another try.
+  function stopMicrophone() {
+    const mine = micRef.current
+    if (!mine) return
+    micRef.current = null
+    try { vizRef.current?.disconnectAudio(mine.source) } catch { /* gone */ }
+    mine.stream.getTracks().forEach((track) => { track.onended = null; track.stop() })
+    if (mounted.current) setMic('off')
+  }
+
+  function startMicrophone() {
     const audio = audioRef.current
-    if (!viz || !audio || micRef.current) return
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      if (vizRef.current !== viz) { stream.getTracks().forEach((track) => track.stop()); return }
-      await audio.resume().catch(() => {})
-      const source = audio.createMediaStreamSource(stream)
-      viz.connectAudio(source)
-      micRef.current = { stream, source }
-      setMic('on')
-    } catch {
-      setMic('denied')
-    }
+    if (!audio || micRef.current || micPending.current) return
+    micPending.current = true
+    // resume() inside the tap itself: some browsers allow it only there.
+    const resumed = audio.resume().catch(() => {})
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(async (stream) => {
+      try {
+        await resumed
+        if (!mounted.current || audioRef.current !== audio) throw new Error('gone')
+        const source = audio.createMediaStreamSource(stream)
+        micRef.current = { stream, source }
+        vizRef.current?.connectAudio(source)
+        stream.getAudioTracks().forEach((track) => { track.onended = stopMicrophone })
+        setMic('on')
+      } catch {
+        if (micRef.current?.stream === stream) micRef.current = null
+        stream.getTracks().forEach((track) => track.stop())
+        if (mounted.current) setMic('denied')
+      }
+    }, () => {
+      if (mounted.current) setMic('denied')
+    }).finally(() => { micPending.current = false })
   }
 
   if (unsupported) {
@@ -239,6 +331,7 @@ export default function VisualizerCanvas({
   return (
     <div className="home-visualizer__stage" ref={wrapRef}>
       <canvas
+        key={generation}
         ref={canvasRef}
         className="home-visualizer__canvas"
         role="img"

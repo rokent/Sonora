@@ -17,8 +17,16 @@ export const FRAME_RATE = 22050
 export const LEVELS_SAMPLES = 1024
 /** How far behind the speaker a frame may be and still be drawn, seconds. */
 export const STALE_SECONDS = 0.25
-/** Frames held at most: 4 s at 30 a second, the oldest dropped first. */
-export const QUEUE_MAX = 120
+/** Frames held at most, the oldest dropped first: 6 s at 30 a second.
+ *
+ * The assumption behind the size: frames should arrive about when the
+ * speaker reaches them, since ffmpeg runs at real time (-re) from the
+ * speaker's position. What can put them ahead is the start-up latency the
+ * server leads by after a restart, capped at 5 s there (MAX_LEAD in
+ * backend/home/analysis.py). The queue covers that with a second to spare;
+ * a server leading by more would lose its oldest frames here, which show
+ * up as the generic animation until the speaker catches up. */
+export const QUEUE_MAX = 180
 
 /** The speaker's position now, in seconds: the last report plus its age
  * while playing. `positionAt` is a ms epoch, as Date.now() gives. */
