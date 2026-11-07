@@ -523,3 +523,32 @@ def test_aac_item_without_ffmpeg_relays_the_m4a(monkeypatch):
         assert r.status == 200 and r.body == DATA
         assert r.headers["content-type"] == "audio/mp4"
     run(go, monkeypatch, ["/good"])
+
+
+def test_relay_waits_out_the_pre_playback_period(monkeypatch):
+    key = media.keys().issue("dQw4w9WgXcQ")
+    waited = []
+
+    async def go(up, resolves):
+        async def until(src):
+            waited.append((src.url, len(up.seen)))
+        monkeypatch.setattr(youtube, "until_available", until)
+        r = await client().request("GET", f"/api/home/media/{key}.m4a")
+        assert r.status == 200
+        assert waited == [(up.url("/good"), 0)]      # before the upstream fetch
+    run(go, monkeypatch, ["/good"])
+
+
+def test_aac_waits_out_the_pre_playback_period_before_ffmpeg(monkeypatch):
+    key = media.keys().issue("dQw4w9WgXcQ")
+    spawned = _aac_rig(monkeypatch, [[b"ok"]])
+    order = []
+
+    async def go(up, resolves):
+        async def until(src):
+            order.append(("wait", len(spawned)))
+        monkeypatch.setattr(youtube, "until_available", until)
+        r = await client().request("GET", f"/api/home/media/{key}.aac")
+        assert r.status == 200
+        assert order == [("wait", 0)]
+    run(go, monkeypatch, ["/good"])

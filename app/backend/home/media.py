@@ -214,6 +214,7 @@ async def _open(method: str, video_id: str, rng: str | None):
         if not main.fetchguard.safe_to_fetch(src.url):
             main.fetchguard.refuse(src.url, "youtube media")
             raise main.fetchguard.Refused("unsafe youtube media url")
+        await youtube.until_available(src)
         headers = dict(src.headers)
         if rng:
             headers["Range"] = rng
@@ -271,6 +272,7 @@ async def _aac(video_id: str, method: str, ffmpeg: str) -> Response:
                 return _error(502, "upstream_failed")
             if method == "HEAD":
                 return Response(status_code=200, headers=headers, media_type="audio/aac")
+            await youtube.until_available(src)
             proc = await _spawn_remux(remux_args(ffmpeg, src.url, src.headers))
             try:
                 first = await asyncio.wait_for(proc.stdout.read(_CHUNK), _REMUX_START)

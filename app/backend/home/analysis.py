@@ -202,6 +202,7 @@ async def default_resolve(uri: str) -> tuple[str, dict[str, str]] | None:
     if not main.fetchguard.safe_to_fetch(src.url):
         main.fetchguard.refuse(src.url, "visual analysis")
         return None
+    await youtube.until_available(src)
     return src.url, dict(src.headers)
 
 

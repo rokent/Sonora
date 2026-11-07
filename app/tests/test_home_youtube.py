@@ -258,3 +258,36 @@ async def test_jobs_are_capped_and_speakers_have_their_own_slot(monkeypatch):
     release.set()
     await asyncio.gather(*guests)
     assert peak[0] == youtube.JOBS + 1
+
+
+async def test_available_at_is_carried_and_waited_out(monkeypatch):
+    """YouTube answers 403 to a stream URL fetched before its pre-playback
+    wait (yt-dlp's ``available_at``) ends; Sonora sleeps it out, capped."""
+    _patch(monkeypatch, {"formats": [_fmt("m4a", "http://g/x", available_at=1000.0)]})
+    src = await youtube.audio_source(VID)
+    assert src.available_at == 1000.0
+    slept = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+    monkeypatch.setattr(youtube.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(youtube.time, "time", lambda: 996.5)
+    await youtube.until_available(src)
+    monkeypatch.setattr(youtube.time, "time", lambda: 1001.0)
+    await youtube.until_available(src)
+    monkeypatch.setattr(youtube.time, "time", lambda: 0.0)
+    await youtube.until_available(src)
+    assert slept == [3.5, 15.0]
+
+
+async def test_no_available_at_means_no_wait(monkeypatch):
+    _patch(monkeypatch, {"formats": [_fmt("m4a", "http://g/x")]})
+    src = await youtube.audio_source(VID)
+    assert src.available_at == 0.0
+    slept = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+    monkeypatch.setattr(youtube.asyncio, "sleep", fake_sleep)
+    await youtube.until_available(src)
+    assert slept == []

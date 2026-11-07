@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 __all__ = [
     "Video", "AudioSource", "YouTubeError", "NoAudio",
     "parse_video_id", "search", "info", "audio_source", "forget_audio",
+    "until_available",
 ]
 
 _ID = re.compile(r"[A-Za-z0-9_-]{11}")
@@ -69,6 +70,9 @@ class AudioSource:
     content_type: str
     size: int | None
     expires: float
+    #: YouTube's pre-playback wait: googlevideo answers 403 before this
+    #: time (epoch seconds; yt-dlp's ``available_at``). 0 when none.
+    available_at: float = 0.0
 
 
 def parse_video_id(text: str) -> str | None:
@@ -205,7 +209,20 @@ def _audio_of(data: dict) -> AudioSource | None:
         content_type="audio/mp4",
         size=int(size) if size else None,
         expires=_expiry(best["url"]),
+        available_at=float(best.get("available_at") or 0),
     )
+
+
+#: The longest Sonora waits out a pre-playback period.
+_MAX_WAIT = 15.0
+
+
+async def until_available(src: AudioSource) -> None:
+    """Sleep until ``src`` may be fetched: YouTube now makes a stream URL wait
+    a few seconds after it is issued (fetching sooner is a 403)."""
+    delay = src.available_at - time.time()
+    if delay > 0:
+        await asyncio.sleep(min(delay, _MAX_WAIT))
 
 
 async def _extract(video_id: str, priority: bool) -> None:
