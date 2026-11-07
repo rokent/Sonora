@@ -11,7 +11,9 @@ A YouTube queue item points at Sonora, not at YouTube:
 `http://<sonora>:<port>/api/home/media/<key>.m4a`. The key is opaque and maps
 only to a video id (kept in `home/media.json`, forgotten after a day unused).
 Each request from a speaker resolves the current googlevideo URL and relays
-it. Nothing is downloaded to disk.
+it. Nothing is downloaded to disk. A fresh stream URL only works a few
+seconds after YouTube issues it (googlevideo answers 403 before then), so the
+first request after an add may wait up to that long before audio flows.
 
 yt-dlp needs two things to get stream URLs from YouTube:
 
