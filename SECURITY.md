@@ -10,7 +10,7 @@ That's a decision, not an oversight.  This is how Sonos' official apps behave (a
 
 This fork can switch logins on. Set `SONORA_OIDC_ISSUER` and Sonora asks people to sign in through your Authentik (or another OIDC provider). Setup is in [docs/authentik.md](docs/authentik.md). With logins on:
 
-- **Users** sign in with their own account. A session lasts 30 days. You can limit access to one group with `SONORA_OIDC_GROUP`.
+- **Users** sign in with their own account. A session lasts 30 days. You can limit access to one group with `SONORA_OIDC_GROUP`. The group is checked only at sign-in: removing someone from the group does not end a session they already have. To sign everyone out at once, delete `<data dir>/home/secret.key` and restart Sonora.
 - **Guests** use a secret link (`/join?token=...`), usually shown as a QR code. A guest session lasts 12 hours and can do less than a user. Making a new link ends all guest sessions that used the old one.
 - **Home Assistant** uses a token. Keep it secret like a password.
 
