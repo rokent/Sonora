@@ -350,3 +350,52 @@ async def test_party_notice_is_broadcast_as_is(rig):
     await rig.ctl.callbacks[0]({"type": "snapshot"})
     assert rig.sent == [{"type": "party_notice", "party": pid, "zone": "B", "event": "left"},
                         {"type": "parties"}]
+
+
+async def test_adders_belong_to_the_last_copies(rig):
+    pid = (await _start()).json()["id"]
+    rig.ctl.queues["A"].append({"id": "Q:0/1", "uri": "x-file:1", "title": "before"})
+    g = client(GUEST)
+    await g.request("POST", f"/api/parties/{pid}/queue", {"uri": "x-file:1", "metadata": "m"})
+    q = (await g.request("GET", f"/api/parties/{pid}/queue")).json()["items"]
+    assert [(i["added_by"], i["can_remove"]) for i in q] == [
+        (None, False), ({"id": "guest:1", "name": "Mara"}, True)]
+    r = await g.request("DELETE", f"/api/parties/{pid}/queue/1")
+    assert r.status == 403 and r.json() == {"error": "not_yours"}
+    assert (await g.request("DELETE", f"/api/parties/{pid}/queue/2")).status == 200
+    assert [i["title"] for i in rig.ctl.queues["A"]] == ["before"]
+    assert (await g.request("GET", "/api/parties")).json()["parties"][0]["queue_owners"] == {}
+
+
+async def test_mid_queue_inserts_are_not_attributed(rig):
+    await _start()
+    u = client(USER)
+    for extra in ({"next": True}, {"position": 1}):
+        r = await u.request("POST", "/api/zones/A/source",
+                            {"uri": "x-file:5", "metadata": "m", "enqueue": True, **extra})
+        assert r.status == 200
+    assert (await u.request("GET", "/api/parties")).json()["parties"][0]["queue_owners"] == {}
+
+
+async def test_queue_start_is_capped(rig):
+    pid = (await _start()).json()["id"]
+    g = client(GUEST)
+    assert (await g.request("GET", f"/api/parties/{pid}/queue?start=10001")).status == 422
+    await g.request("POST", f"/api/parties/{pid}/queue", {"uri": "x-file:1", "metadata": "m"})
+    r = (await g.request("GET", f"/api/parties/{pid}/queue?start=5")).json()
+    assert r["items"] == [] and r["total"] == 1 and r["has_more"] is False
+
+
+async def test_engine_failure_is_logged_once(rig, monkeypatch, caplog):
+    made = []
+
+    def broken(*a, **k):
+        made.append(1)
+        raise TypeError("corrupt parties.json")
+    monkeypatch.setattr(routes, "PartyEngine", broken)
+    u = client(USER)
+    for _ in range(3):
+        r = await u.request("GET", "/api/parties")
+        assert r.status == 503 and r.json() == {"error": "parties_unavailable"}
+    assert len(made) == 1
+    assert sum("could not be made" in rec.getMessage() for rec in caplog.records) == 1

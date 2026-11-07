@@ -7,8 +7,9 @@ announced to every open page as ``{"type": "parties"}``; the engine's own
 notices (a speaker left a party) go out as they are, followed by the same.
 
 A party's queue is the Sonos queue of its lead. Who added what is kept by the
-engine per track URI, oldest adder first, so the n-th copy of a URI in the
-queue is matched to its n-th adder.
+engine per track URI, oldest adder first. Adds go to the end of the queue, so
+a URI's adders are matched to its last copies, oldest adder to the earliest
+of those; copies before them (there before the party) have no adder.
 
 ``main.py`` is imported inside functions only: it imports this package.
 """
@@ -16,6 +17,7 @@ queue is matched to its n-th adder.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from typing import Any
@@ -28,6 +30,8 @@ from .auth import Principal, request_principal
 from .parties import MixedHousehold, NoSpeakers, PartyEngine, SpeakerTaken
 from .presets import Presets
 from .store import home_dir
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -42,6 +46,8 @@ _queue_lock = asyncio.Lock()
 
 TRANSPORT = {"play": "play", "pause": "pause", "next": "next_track", "previous": "previous_track"}
 QUEUE_LIMIT = 500
+#: The furthest a party queue page may start.
+START_LIMIT = 10000
 
 
 class Refused(Exception):
@@ -78,7 +84,17 @@ def engine() -> PartyEngine:
     path = home_dir() / "parties.json"
     held = _held.get("engine")
     if held is None or held[0] is not controller or held[1] != path:
-        found = PartyEngine(path, controller, commands, _scene_metadata, _notify)
+        failed = _held.get("failed")
+        if failed is not None and failed[0] is controller and failed[1] == path:
+            raise Refused(503, "parties_unavailable")
+        try:
+            found = PartyEngine(path, controller, commands, _scene_metadata, _notify)
+        except Exception:
+            # Said once; not tried again until the controller or folder changes.
+            log.exception("parties: the party engine could not be made from %s", path)
+            _held["failed"] = (controller, path)
+            raise Refused(503, "parties_unavailable") from None
+        _held.pop("failed", None)
         controller.on_state(found.on_state)
         _held["engine"] = held = (controller, path, found)
         _members.clear()
@@ -163,31 +179,53 @@ def _lead(party: dict) -> str:
     return party["speakers"][0]
 
 
-async def _queue_items(lead: str, count: int) -> tuple[dict, str]:
-    """The first ``count`` items of the queue ``lead`` plays, as
-    ``/api/queue/{uuid}`` gives them."""
+async def _whole_queue(lead: str) -> tuple[dict, list[dict]]:
+    """The whole queue ``lead`` plays, as ``/api/queue/{uuid}`` gives it:
+    the first page's fields and every item."""
     ctl = _main().state["controller"]
     target = ctl.coordinator_of(lead)
-    result = await ctl.content.queue(target.host, start=0, count=count)
-    return result.as_dict(target.host), target.host
-
-
-def _occurrence(items: list[dict], index: int) -> int:
-    """How many copies of item ``index``'s URI come before it (0-based index)."""
-    uri = items[index].get("uri")
-    return sum(1 for item in items[:index] if item.get("uri") == uri)
+    page = (await ctl.content.queue(target.host, start=0, count=QUEUE_LIMIT)).as_dict(target.host)
+    items = list(page["items"])
+    while len(items) < page["total"]:
+        more = (await ctl.content.queue(target.host, start=len(items),
+                                        count=QUEUE_LIMIT)).as_dict(target.host)
+        if not more["items"]:
+            break
+        items += more["items"]
+    return page, items
 
 
 def _adders(party: dict, uri: str) -> list[dict]:
     return party.get("queue_owners", {}).get(uri) or []
 
 
-def _may_remove(party: dict, uri: str, nth: int, who: Principal) -> bool:
+def _attribution(items: list[dict], party: dict) -> list[int | None]:
+    """For each queue item, the index of its adder in ``queue_owners[uri]``,
+    or None when it has none. Adds go to the end of the queue, so a URI's
+    adders belong to its last copies: with three copies and two adders, the
+    first copy (there before) has none and the other two are the adders',
+    oldest first."""
+    copies: dict[str, int] = {}
+    for item in items:
+        uri = item.get("uri") or ""
+        copies[uri] = copies.get(uri, 0) + 1
+    seen: dict[str, int] = {}
+    out: list[int | None] = []
+    for item in items:
+        uri = item.get("uri") or ""
+        k = seen.get(uri, 0)
+        seen[uri] = k + 1
+        n = k - (copies[uri] - len(_adders(party, uri)))
+        out.append(n if n >= 0 else None)
+    return out
+
+
+def _may_remove(party: dict, uri: str, nth: int | None, who: Principal) -> bool:
     """A user may remove anything; a guest only a copy they added."""
     if not who.is_guest:
         return True
     adders = _adders(party, uri)
-    return nth < len(adders) and adders[nth]["id"] == who.id
+    return nth is not None and nth < len(adders) and adders[nth]["id"] == who.id
 
 
 # -- routes: parties ----------------------------------------------------------
@@ -307,7 +345,8 @@ async def join_party(request: Request, party_id: str):
 
 
 @router.get("/api/parties/{party_id}/queue")
-async def party_queue(request: Request, party_id: str, start: int = Query(default=0, ge=0),
+async def party_queue(request: Request, party_id: str,
+                      start: int = Query(default=0, ge=0, le=START_LIMIT),
                       count: int = Query(default=200, ge=1, le=QUEUE_LIMIT)):
     who = request_principal(request)
     try:
@@ -315,23 +354,17 @@ async def party_queue(request: Request, party_id: str, start: int = Query(defaul
         lead = _lead(party)
     except Refused as exc:
         return _answer(exc)
-    # Read from the top, so each copy of a URI is matched to its own adder.
-    page, _ = await _queue_items(lead, start + count)
-    items = page["items"]
-    seen: dict[str, int] = {}
+    # The whole queue, so each copy of a URI is matched to its own adder.
+    page, items = await _whole_queue(lead)
+    owners = _attribution(items, party)
     out = []
-    for i, item in enumerate(items):
+    for item, nth in list(zip(items, owners))[start:start + count]:
         uri = item.get("uri") or ""
-        nth = seen.get(uri, 0)
-        seen[uri] = nth + 1
-        if i < start:
-            continue
         adders = _adders(party, uri)
-        adder = adders[nth] if nth < len(adders) else None
-        out.append({**item, "added_by": dict(adder) if adder else None,
+        out.append({**item, "added_by": dict(adders[nth]) if nth is not None else None,
                     "can_remove": _may_remove(party, uri, nth, who)})
     return {**page, "start": start, "returned": len(out), "items": out,
-            "has_more": start + len(out) < page["total"], "party": party_id}
+            "total": len(items), "has_more": start + len(out) < len(items), "party": party_id}
 
 
 @router.post("/api/parties/{party_id}/queue")
@@ -360,16 +393,16 @@ async def remove_from_party_queue(request: Request, party_id: str, index: int):
         if index < 1:
             raise Refused(400, "invalid", message="track positions start at 1")
         async with _queue_lock:
-            page, _ = await _queue_items(lead, index)
-            items = page["items"]
+            _, items = await _whole_queue(lead)
             if len(items) < index:
                 raise Refused(404, "not_found", message=f"no track {index}")
             uri = items[index - 1].get("uri") or ""
-            nth = _occurrence(items, index - 1)
+            nth = _attribution(items, party)[index - 1]
             if not _may_remove(party, uri, nth, who):
                 raise Refused(403, "not_yours")
             await _main().state["commands"].remove_from_queue(lead, index)
-            engine().record_remove(party_id, uri, nth=nth)
+            if nth is not None:
+                engine().record_remove(party_id, uri, nth=nth)
     except Refused as exc:
         return _answer(exc)
     await changed()
@@ -499,8 +532,11 @@ async def attribution(request: Request, call_next):
             body = None
         response = await call_next(request)
         who = getattr(request.state, "principal", None)
+        # Only an add at the end: the party matches adders to a URI's last
+        # copies, which a Play Next or a drop between rows would break.
         if (response.status_code == 200 and who is not None and isinstance(body, dict)
-                and body.get("enqueue") and not body.get("replace") and body.get("uri")):
+                and body.get("enqueue") and not body.get("replace") and body.get("uri")
+                and not body.get("next") and not body.get("position")):
             engine().record_add(party_id, str(body["uri"]), who)
             await changed()
         return response
@@ -511,10 +547,10 @@ async def attribution(request: Request, call_next):
             return await call_next(request)
         async with _queue_lock:
             try:
-                page, _ = await _queue_items(m.group(1), index)
-                items = page["items"]
-                found = (items[index - 1].get("uri") or "", _occurrence(items, index - 1)) \
-                    if len(items) >= index else None
+                party = engine().get(party_id) or {}
+                _, items = await _whole_queue(m.group(1))
+                nth = _attribution(items, party)[index - 1] if len(items) >= index else None
+                found = (items[index - 1].get("uri") or "", nth) if nth is not None else None
             except Exception:                          # noqa: BLE001 - Sonora's route answers for itself
                 found = None
             response = await call_next(request)
