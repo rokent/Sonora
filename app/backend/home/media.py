@@ -6,12 +6,23 @@ survive a restart, purged after 24 h unused). Each speaker request resolves
 the googlevideo URL (cached in ``youtube``) and relays it with Range
 pass-through, so the speaker sees an ordinary progressive AAC file it can seek
 in. Nothing is stored on disk but the key map.
+
+YouTube's m4a is fragmented MP4, which not every speaker plays. With
+``SONORA_YOUTUBE_FORMAT=aac`` the item is ``<key>.aac`` instead and each
+request runs ffmpeg to copy the AAC audio out into a raw ADTS stream
+(``audio/aac``, no re-encode): every speaker plays that, but it has no length
+and no Range, so the track cannot be seeked. Without ffmpeg the mode falls
+back to m4a, with a warning.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 import re
 import secrets
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -26,6 +37,7 @@ from . import youtube
 from .store import home_dir, read_json, write_json
 from .youtube import Video
 
+log = logging.getLogger(__name__)
 __all__ = ["MEDIA_URI", "MediaKeys", "keys", "media_url", "speaker_base", "didl_for", "router"]
 
 router = APIRouter()
@@ -36,10 +48,40 @@ _TTL = 24 * 3600.0
 _TOUCH_WRITE = 600.0
 _KEY = re.compile(r"[A-Za-z0-9_-]{16,64}")
 #: A queue item's URI as ``media_url`` builds it; group 1 is the key.
-MEDIA_URI = re.compile(r"https?://[^/]+/api/home/media/([A-Za-z0-9_-]{16,64})\.m4a")
+MEDIA_URI = re.compile(r"https?://[^/]+/api/home/media/([A-Za-z0-9_-]{16,64})\.(?:m4a|aac)")
 _PASSED = ("Content-Length", "Content-Range", "Accept-Ranges")
 #: The only Range form relayed (one range); anything else is ignored.
 _RANGE = re.compile(r"bytes=\d*-\d*")
+#: What a speaker gets: the m4a relayed as it is, or ffmpeg's ADTS remux.
+FORMATS = ("m4a", "aac")
+_CONTENT_TYPE = {"m4a": "audio/mp4", "aac": "audio/aac"}
+#: How long ffmpeg may take to produce its first bytes.
+_REMUX_START = 30.0
+_CHUNK = 64 * 1024
+_warned: set[str] = set()
+
+
+def _warn_once(key: str, message: str, *args) -> None:
+    if key not in _warned:
+        _warned.add(key)
+        log.warning(message, *args)
+
+
+def ffmpeg_path() -> str | None:
+    return shutil.which("ffmpeg")
+
+
+def youtube_format() -> str:
+    """``m4a`` or ``aac`` as ``SONORA_YOUTUBE_FORMAT`` asks; ``aac`` needs
+    ffmpeg and falls back to ``m4a`` without it."""
+    wanted = (os.environ.get("SONORA_YOUTUBE_FORMAT") or "m4a").strip().lower()
+    if wanted not in FORMATS:
+        _warn_once(f"bad:{wanted}", "SONORA_YOUTUBE_FORMAT=%r is not m4a or aac; using m4a", wanted)
+        return "m4a"
+    if wanted == "aac" and not ffmpeg_path():
+        _warn_once("noffmpeg", "SONORA_YOUTUBE_FORMAT=aac needs ffmpeg, which is not on PATH; using m4a")
+        return "m4a"
+    return wanted
 
 
 class MediaKeys:
@@ -118,7 +160,7 @@ def base_url(host_for: str) -> str:
 
 def media_url(key: str, host_for: str) -> str:
     """The URL a speaker fetches for a media key."""
-    return f"{base_url(host_for)}/api/home/media/{key}.m4a"
+    return f"{base_url(host_for)}/api/home/media/{key}.{youtube_format()}"
 
 
 #: The same address under the live hub's name (``live_routes`` passes it as
@@ -137,7 +179,9 @@ def _hms(seconds: int) -> str:
 
 
 def didl_for(video: Video, uri: str) -> str:
-    """The DIDL-Lite a speaker gets with a YouTube queue item."""
+    """The DIDL-Lite a speaker gets with a YouTube queue item; its MIME type
+    follows the URI's extension (the format it was queued in)."""
+    mime = _CONTENT_TYPE["aac" if uri.endswith(".aac") else "m4a"]
     art = (f"<upnp:albumArtURI>{_x(video.thumbnail)}</upnp:albumArtURI>"
            if video.thumbnail else "")
     return (
@@ -146,7 +190,7 @@ def didl_for(video: Video, uri: str) -> str:
         'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" '
         'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">'
         f'<item id="youtube:{_x(video.id)}" parentID="youtube" restricted="true">'
-        f'<res protocolInfo="http-get:*:audio/mp4:*" duration="{_hms(video.duration)}">'
+        f'<res protocolInfo="http-get:*:{mime}:*" duration="{_hms(video.duration)}">'
         f"{_x(uri)}</res>{art}"
         f"<dc:title>{_x(video.title)}</dc:title>"
         f"<dc:creator>{_x(video.channel)}</dc:creator>"
@@ -166,7 +210,7 @@ async def _open(method: str, video_id: str, rng: str | None):
 
     session = main.state["outward"]
     for attempt in (0, 1):
-        src = await youtube.audio_source(video_id)
+        src = await youtube.audio_source(video_id, priority=True)
         if not main.fetchguard.safe_to_fetch(src.url):
             main.fetchguard.refuse(src.url, "youtube media")
             raise main.fetchguard.Refused("unsafe youtube media url")
@@ -175,7 +219,7 @@ async def _open(method: str, video_id: str, rng: str | None):
             headers["Range"] = rng
         upstream = await session.request(
             method, src.url, headers=headers, allow_redirects=True,
-            timeout=aiohttp.ClientTimeout(total=None, sock_connect=15))
+            timeout=aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=30))
         if upstream.status in (403, 410):
             upstream.release()
             youtube.forget_audio(video_id)
@@ -183,6 +227,93 @@ async def _open(method: str, video_id: str, rng: str | None):
                 continue
         return upstream
     return upstream  # pragma: no cover - loop always returns
+
+
+def remux_args(ffmpeg: str, url: str, headers: dict[str, str]) -> list[str]:
+    """ffmpeg copying the AAC audio of ``url`` out as ADTS on stdout."""
+    from .analysis import _safe_header
+
+    args = [ffmpeg, "-nostdin", "-loglevel", "error"]
+    safe = {k: v for k, v in (headers or {}).items() if _safe_header(k, v)}
+    if safe:
+        args += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in safe.items())]
+    # only network reads: a crafted URL cannot make ffmpeg open a local file
+    return args + ["-protocol_whitelist", "https,tls,tcp,http", "-i", url,
+                   "-vn", "-c:a", "copy", "-f", "adts", "pipe:1"]
+
+
+async def _spawn_remux(args: list[str]):
+    return await asyncio.create_subprocess_exec(
+        *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL)
+
+
+async def _stop(proc) -> None:
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+
+
+async def _aac(video_id: str, method: str, ffmpeg: str) -> Response:
+    """The ADTS remux of ``video_id``'s audio. ffmpeg producing nothing is
+    taken as an expired stream URL: resolved afresh and tried once more."""
+    from .. import main  # lazy: main imports home
+
+    headers = {"Accept-Ranges": "none", "Cache-Control": "no-cache"}
+    try:
+        for attempt in (0, 1):
+            src = await youtube.audio_source(video_id, priority=True)
+            if not main.fetchguard.safe_to_fetch(src.url):
+                main.fetchguard.refuse(src.url, "youtube media")
+                return _error(502, "upstream_failed")
+            if method == "HEAD":
+                return Response(status_code=200, headers=headers, media_type="audio/aac")
+            proc = await _spawn_remux(remux_args(ffmpeg, src.url, src.headers))
+            try:
+                first = await asyncio.wait_for(proc.stdout.read(_CHUNK), _REMUX_START)
+            except TimeoutError:
+                first = b""
+            if first:
+                break
+            await _stop(proc)
+            youtube.forget_audio(video_id)
+        else:
+            return _error(502, "upstream_failed")
+    except youtube.YouTubeError:
+        return _error(502, "youtube_failed")
+    except OSError:
+        log.warning("youtube aac: ffmpeg could not start", exc_info=True)
+        return _error(502, "upstream_failed")
+
+    async def body():
+        try:
+            yield first
+            while chunk := await proc.stdout.read(_CHUNK):
+                yield chunk
+        finally:
+            await _stop(proc)
+
+    return StreamingResponse(body(), status_code=200, media_type="audio/aac",
+                             headers=headers)
+
+
+@router.api_route("/api/home/media/{key}.aac", methods=["GET", "HEAD"],
+                  include_in_schema=False)
+async def media_aac(key: str, request: Request) -> Response:
+    """A YouTube video's audio as an ADTS stream (``SONORA_YOUTUBE_FORMAT=aac``)."""
+    video_id = keys().video_of(key) if _KEY.fullmatch(key) else None
+    if video_id is None:
+        return _error(404, "not_found")
+    method = "HEAD" if request.method == "HEAD" else "GET"
+    ffmpeg = ffmpeg_path()
+    if not ffmpeg:
+        _warn_once("aac-route", "an .aac YouTube item was asked for but ffmpeg is "
+                   "not on PATH; relaying the m4a instead")
+        return await media(key, request)
+    return await _aac(video_id, method, ffmpeg)
 
 
 @router.api_route("/api/home/media/{key}.m4a", methods=["GET", "HEAD"],

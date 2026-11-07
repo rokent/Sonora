@@ -68,7 +68,7 @@ CLOSE_UNKNOWN_PARTY = 4004
 CLOSE_TOO_SLOW = 4008              # a send did not complete in SEND_TIMEOUT
 SEND_TIMEOUT = 5.0
 
-_MEDIA_PATH = re.compile(r"/api/home/media/([A-Za-z0-9_-]{16,64})\.m4a")
+_MEDIA_PATH = re.compile(r"/api/home/media/([A-Za-z0-9_-]{16,64})\.(?:m4a|aac)")
 
 
 @dataclass(frozen=True)

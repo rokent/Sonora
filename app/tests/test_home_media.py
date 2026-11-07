@@ -95,7 +95,7 @@ def run(coro_fn, monkeypatch, sources):
         resolves = []
         queue = list(sources)
 
-        async def fake_source(video_id):
+        async def fake_source(video_id, priority=False):
             hit = youtube._audio_cache.get(video_id)
             if hit is not None:
                 return hit
@@ -206,7 +206,7 @@ def test_resolver_failure_is_502(monkeypatch):
     key = media.keys().issue("dQw4w9WgXcQ")
 
     async def go(up, resolves):
-        async def broken(video_id):
+        async def broken(video_id, priority=False):
             raise youtube.YouTubeError("removed")
         monkeypatch.setattr(youtube, "audio_source", broken)
         r = await client().request("GET", f"/api/home/media/{key}.m4a")
@@ -322,4 +322,204 @@ def test_odd_range_values_are_not_forwarded(monkeypatch, bad):
                                    headers={"Range": bad})
         assert r.status == 200 and r.body == DATA
         assert "Range" not in up.seen[0][2]
+    run(go, monkeypatch, ["/good"])
+
+
+# --- relay timeouts and the speaker's priority slot ---------------------------
+
+def test_relay_uses_a_read_timeout_and_the_priority_slot(monkeypatch):
+    key = media.keys().issue("dQw4w9WgXcQ")
+    seen = {}
+
+    async def go(up, resolves):
+        real_source = youtube.audio_source
+
+        async def recording(video_id, priority=False):
+            seen["priority"] = priority
+            return await real_source(video_id, priority)
+        monkeypatch.setattr(youtube, "audio_source", recording)
+        session = main.state["outward"]
+        real_request = session.request
+
+        async def request(method, url, **kw):
+            seen["timeout"] = kw["timeout"]
+            return await real_request(method, url, **kw)
+        monkeypatch.setattr(session, "request", request)
+        r = await client().request("GET", f"/api/home/media/{key}.m4a")
+        assert r.status == 200
+    run(go, monkeypatch, ["/good"])
+    assert seen["priority"] is True
+    t = seen["timeout"]
+    assert (t.total, t.sock_connect, t.sock_read) == (None, 15, 30)
+
+
+# --- SONORA_YOUTUBE_FORMAT ------------------------------------------------------
+
+@pytest.fixture
+def controller_at(monkeypatch):
+    class Events:
+        _callback_ip = "192.168.1.20"
+    monkeypatch.setitem(main.state, "controller", type("C", (), {"events": Events()})())
+    monkeypatch.setattr(settings, "port", 50205)
+    media._warned.clear()
+    yield
+    media._warned.clear()
+
+
+def test_format_defaults_to_m4a(monkeypatch, controller_at):
+    monkeypatch.delenv("SONORA_YOUTUBE_FORMAT", raising=False)
+    assert media.youtube_format() == "m4a"
+    assert media.media_url("k1", "x").endswith("/api/home/media/k1.m4a")
+
+
+def test_format_aac_with_ffmpeg(monkeypatch, controller_at):
+    monkeypatch.setenv("SONORA_YOUTUBE_FORMAT", "AAC")
+    monkeypatch.setattr(media, "ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    assert media.youtube_format() == "aac"
+    uri = media.media_url("k1", "x")
+    assert uri == "http://192.168.1.20:50205/api/home/media/k1.aac"
+    didl = media.didl_for(Video("dQw4w9WgXcQ", "t", "c", 1, ""), uri)
+    assert 'protocolInfo="http-get:*:audio/aac:*"' in didl
+
+
+def test_format_aac_without_ffmpeg_falls_back_with_a_warning(monkeypatch, controller_at, caplog):
+    monkeypatch.setenv("SONORA_YOUTUBE_FORMAT", "aac")
+    monkeypatch.setattr(media, "ffmpeg_path", lambda: None)
+    with caplog.at_level("WARNING"):
+        assert media.youtube_format() == "m4a"
+        assert media.youtube_format() == "m4a"
+    assert media.media_url("k1", "x").endswith(".m4a")
+    warnings = [r for r in caplog.records if "ffmpeg" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_format_unknown_value_is_m4a(monkeypatch, controller_at):
+    monkeypatch.setenv("SONORA_YOUTUBE_FORMAT", "opus")
+    assert media.youtube_format() == "m4a"
+
+
+def test_media_uri_matches_both_extensions():
+    long = "A" * 22
+    assert media.MEDIA_URI.fullmatch(f"http://h:1/api/home/media/{long}.m4a")
+    assert media.MEDIA_URI.fullmatch(f"http://h:1/api/home/media/{long}.aac")
+    assert not media.MEDIA_URI.fullmatch(f"http://h:1/api/home/media/{long}.mp3")
+
+
+def test_remux_args_are_network_only_and_headers_safe():
+    args = media.remux_args("/usr/bin/ffmpeg", "https://g/x",
+                            {"User-Agent": "ua", "Bad\r\nX": "y", "Evil": "a\r\nInjected: 1"})
+    assert args[:2] == ["/usr/bin/ffmpeg", "-nostdin"]
+    assert args[args.index("-headers") + 1] == "User-Agent: ua\r\n"
+    assert args[args.index("-protocol_whitelist") + 1] == "https,tls,tcp,http"
+    assert args.index("-protocol_whitelist") < args.index("-i")
+    assert args[args.index("-i") + 1] == "https://g/x"
+    assert args[-8:] == ["-i", "https://g/x", "-vn", "-c:a", "copy", "-f", "adts", "pipe:1"]
+
+
+class FakeProc:
+    """An ffmpeg stand-in whose stdout yields ``chunks`` then EOF."""
+
+    def __init__(self, chunks):
+        self.stdout = asyncio.StreamReader()
+        for c in chunks:
+            self.stdout.feed_data(c)
+        self.stdout.feed_eof()
+        self.returncode = None
+        self.killed = False
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self):
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+
+def _aac_rig(monkeypatch, outputs):
+    """ffmpeg present; each spawn hands out the next FakeProc output."""
+    spawned = []
+    monkeypatch.setattr(media, "ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+
+    async def spawn(args):
+        proc = FakeProc(outputs.pop(0))
+        spawned.append((args, proc))
+        return proc
+    monkeypatch.setattr(media, "_spawn_remux", spawn)
+    return spawned
+
+
+def test_aac_streams_adts_without_range(monkeypatch):
+    key = media.keys().issue("dQw4w9WgXcQ")
+    spawned = _aac_rig(monkeypatch, [[b"\xff\xf1aaa", b"bbb"]])
+
+    async def go(up, resolves):
+        r = await client().request("GET", f"/api/home/media/{key}.aac",
+                                   headers={"Range": "bytes=100-"})
+        assert r.status == 200
+        assert r.body == b"\xff\xf1aaabbb"
+        assert r.headers["content-type"] == "audio/aac"
+        assert r.headers["accept-ranges"] == "none"
+        assert "content-range" not in r.headers
+        args = spawned[0][0]
+        assert args[args.index("-i") + 1] == up.url("/good")
+        assert args[args.index("-headers") + 1] == "User-Agent: yt\r\n"
+        assert up.seen == []                    # ffmpeg fetches, not Sonora
+    run(go, monkeypatch, ["/good"])
+    assert spawned[0][1].returncode is not None
+
+
+def test_aac_head_spawns_nothing(monkeypatch):
+    key = media.keys().issue("dQw4w9WgXcQ")
+    spawned = _aac_rig(monkeypatch, [])
+
+    async def go(up, resolves):
+        r = await client().request("HEAD", f"/api/home/media/{key}.aac")
+        assert r.status == 200 and r.body == b""
+        assert r.headers["content-type"] == "audio/aac"
+        assert resolves == ["dQw4w9WgXcQ"]
+    run(go, monkeypatch, ["/good"])
+    assert spawned == []
+
+
+def test_aac_silent_ffmpeg_is_resolved_again_once(monkeypatch):
+    key = media.keys().issue("dQw4w9WgXcQ")
+    spawned = _aac_rig(monkeypatch, [[], [b"ok"]])
+
+    async def go(up, resolves):
+        r = await client().request("GET", f"/api/home/media/{key}.aac")
+        assert r.status == 200 and r.body == b"ok"
+        assert resolves == ["dQw4w9WgXcQ", "dQw4w9WgXcQ"]
+    run(go, monkeypatch, ["/expired", "/good"])
+    assert len(spawned) == 2
+
+
+def test_aac_still_silent_is_502(monkeypatch):
+    key = media.keys().issue("dQw4w9WgXcQ")
+    _aac_rig(monkeypatch, [[], []])
+
+    async def go(up, resolves):
+        r = await client().request("GET", f"/api/home/media/{key}.aac")
+        assert r.status == 502 and r.json() == {"error": "upstream_failed"}
+    run(go, monkeypatch, ["/expired"])
+
+
+def test_aac_unknown_key_is_404(monkeypatch):
+    _aac_rig(monkeypatch, [])
+
+    async def go(up, resolves):
+        r = await client().request("GET", "/api/home/media/nosuchkeyAAAAAAAAAAAAA.aac")
+        assert r.status == 404
+    run(go, monkeypatch, ["/good"])
+
+
+def test_aac_item_without_ffmpeg_relays_the_m4a(monkeypatch):
+    key = media.keys().issue("dQw4w9WgXcQ")
+    monkeypatch.setattr(media, "ffmpeg_path", lambda: None)
+
+    async def go(up, resolves):
+        r = await client().request("GET", f"/api/home/media/{key}.aac")
+        assert r.status == 200 and r.body == DATA
+        assert r.headers["content-type"] == "audio/mp4"
     run(go, monkeypatch, ["/good"])
