@@ -81,6 +81,10 @@ const ERROR_KEYS = {
   forbidden: 'home.error.forbidden',
   not_found: 'home.error.notFound',
   speaker_taken: 'home.error.taken',
+  bad_link: 'home.youtube.error.badLink',
+  no_audio: 'home.youtube.error.noAudio',
+  youtube_failed: 'home.youtube.error.failed',
+  bad_query: 'home.youtube.error.badQuery',
 }
 
 /** Words for a failed party request. */

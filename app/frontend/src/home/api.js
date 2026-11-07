@@ -18,6 +18,8 @@ export const homeApi = {
   dequeue: (pid, index) => request(`/api/parties/${id(pid)}/queue/${id(index)}`, { method: 'DELETE' }),
   transport: (pid, action) => post(`/api/parties/${id(pid)}/transport/${id(action)}`),
   volume: (pid, body) => post(`/api/parties/${id(pid)}/volume`, body),
+  youtubeSearch: (q) => request(`/api/youtube/search?q=${id(q)}`),
+  addYouTube: (pid, body) => post(`/api/parties/${id(pid)}/youtube`, body),
   presets: () => request('/api/presets'),
   savePreset: (body) => post('/api/presets', body),
   updatePreset: (pid, body) => request(`/api/presets/${id(pid)}`, { method: 'PUT', body }),

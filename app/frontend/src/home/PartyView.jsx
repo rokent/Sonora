@@ -9,6 +9,9 @@ import Art from '../components/Art.jsx'
 import * as Icon from '../components/Icons.jsx'
 import { homeApi } from './api.js'
 import AddSongs from './AddSongs.jsx'
+import RemoteBrowser from './RemoteBrowser.jsx'
+import VideoWindow from './VideoWindow.jsx'
+import { mediaKeyOf, transportAnchor } from '../lib/videoSync.js'
 import { useMe } from './useMe.js'
 import {
   RoomChecklist, Sheet, VolumeSlider, errorText, go, holders, partyNowPlaying, partyRooms,
@@ -32,15 +35,76 @@ function useLeftNotice(partyId) {
   return shown ? { ...shown, room: zones[shown.zone]?.name || '' } : null
 }
 
-function Queue({ party }) {
+/** The party's queue, fetched again whenever the speakers say it changed. */
+function usePartyQueue(party) {
   const { t } = useI18n()
   const { queueEpochs, partiesEpoch } = useSystem()
-  const lead = party.speakers?.[0] || ''
+  const lead = party?.speakers?.[0] || ''
+  const partyId = party?.id || ''
   const [queue, setQueue] = useState(null)
   const [error, setError] = useState('')
   const [nudge, setNudge] = useState(0)
-  const [busy, setBusy] = useState(null)
   const epoch = queueEpochs[lead] || 0
+
+  useEffect(() => {
+    if (!partyId) return undefined
+    if (!lead) { setQueue({ items: [], start: 0 }); return undefined }
+    let live = true
+    homeApi.partyQueue(partyId)
+      .then((r) => { if (live) { setQueue(r); setError('') } })
+      .catch((exc) => { if (live) setError(errorText(t, exc)) })
+    return () => { live = false }
+  }, [partyId, lead, epoch, partiesEpoch, nudge, t])
+
+  return { queue, error, setError, reload: () => setNudge((n) => n + 1) }
+}
+
+/** The YouTube video the speakers are playing, if they are playing one of ours. */
+function currentVideo(transport, queue) {
+  const uri = transport?.track_uri || ''
+  if (!mediaKeyOf(uri)) return null
+  const items = queue?.items || []
+  const byUri = items.find((item) => item.uri === uri && item.video_id)
+  if (byUri) return byUri
+  const at = (transport?.track_number || 0) - 1 - (queue?.start || 0)
+  const byNumber = items[at]
+  return byNumber?.video_id ? byNumber : null
+}
+
+const VIDEO_HIDDEN_KEY = 'sonora.videoHidden'
+function readHidden() {
+  try { return window.localStorage.getItem(VIDEO_HIDDEN_KEY) === '1' } catch { return false }
+}
+
+/** The video window under now-playing, which the reader can fold away. */
+function PartyVideo({ videoId, transport }) {
+  const { t } = useI18n()
+  const [hidden, setHidden] = useState(readHidden)
+  const fallbackAt = useRef(performance.now())
+  const anchor = useMemo(() => transportAnchor(transport, fallbackAt.current),
+    [transport?.rel_time, transport?.received_at, transport?.state, transport?.position_age]) // eslint-disable-line react-hooks/exhaustive-deps
+  const toggle = () => {
+    const next = !hidden
+    setHidden(next)
+    try { window.localStorage.setItem(VIDEO_HIDDEN_KEY, next ? '1' : '0') } catch { /* private window */ }
+  }
+  return (
+    <section className="hp-section">
+      <div className="hp-row">
+        <h2 className="hp-h2">{t('home.video.title')}</h2>
+        <button type="button" className="hp-btn hp-btn--small hp-btn--ghost" aria-expanded={!hidden} onClick={toggle}>
+          {hidden ? t('home.video.show') : t('home.video.hide')}
+        </button>
+      </div>
+      {!hidden && <VideoWindow videoId={videoId} {...anchor} />}
+    </section>
+  )
+}
+
+function Queue({ party, state }) {
+  const { t } = useI18n()
+  const { queue, error, setError, reload } = state
+  const [busy, setBusy] = useState(null)
   const me = useMe().principal
   // Who is a guest: the party's members say, and a guest viewer is one.
   const guestIds = useMemo(() => {
@@ -49,21 +113,12 @@ function Queue({ party }) {
     return ids
   }, [party.members, me])
 
-  useEffect(() => {
-    if (!lead) { setQueue({ items: [], start: 0 }); return undefined }
-    let live = true
-    homeApi.partyQueue(party.id)
-      .then((r) => { if (live) { setQueue(r); setError('') } })
-      .catch((exc) => { if (live) setError(errorText(t, exc)) })
-    return () => { live = false }
-  }, [party.id, lead, epoch, partiesEpoch, nudge, t])
-
   async function remove(index) {
     setBusy(index)
     setError('')
     try {
       await homeApi.dequeue(party.id, index)
-      setNudge((n) => n + 1)
+      reload()
     } catch (exc) {
       setError(errorText(t, exc))
     }
@@ -88,6 +143,7 @@ function Queue({ party }) {
               <span className="hp-song__text">
                 <span className="hp-ellipsis hp-block">{item.title}</span>
                 <span className="hp-muted hp-small hp-ellipsis hp-block">
+                  {item.source === 'youtube' && <span className="hp-badge">{t('home.youtube.badge')}</span>}
                   {[item.artist, who].filter(Boolean).join(' · ')}
                 </span>
               </span>
@@ -143,6 +199,7 @@ export default function PartyView({ id, data, isUser }) {
   const { zones } = useSystem()
   const party = (data.parties || []).find((p) => p.id === id) || null
   const notice = useLeftNotice(id)
+  const queueState = usePartyQueue(party)
   const [tab, setTab] = useState('queue')
   const [error, setError] = useState('')
   const [ask, setAsk] = useState(null)
@@ -174,6 +231,7 @@ export default function PartyView({ id, data, isUser }) {
   const lead = now.lead
   const speakers = party.speakers || []
   const paused = !speakers.length
+  const video = paused ? null : currentVideo(lead?.transport, queueState.queue)
 
   const act = async (fn) => {
     setError('')
@@ -245,6 +303,8 @@ export default function PartyView({ id, data, isUser }) {
       </section>
       {error && <p className="hp-bad" role="alert">{error}</p>}
 
+      {video && <PartyVideo videoId={video.video_id} transport={lead?.transport} />}
+
       {!paused && (
         <section className="hp-section">
           <div className="hp-vol hp-vol--group">
@@ -274,10 +334,12 @@ export default function PartyView({ id, data, isUser }) {
         {isUser && <button type="button" role="tab" aria-selected={tab === 'rooms'} className="hp-tab" onClick={() => setTab('rooms')}>{t('home.tab.rooms')}</button>}
       </div>
       <section className="hp-section">
-        {tab === 'queue' && <Queue party={party} />}
-        {tab === 'add' && !paused && <AddSongs party={party} />}
+        {tab === 'queue' && <Queue party={party} state={queueState} />}
+        {tab === 'add' && !paused && <AddSongs party={party} onAdded={queueState.reload} />}
         {tab === 'rooms' && isUser && <Rooms party={party} parties={data.parties} />}
       </section>
+
+      <div className="hp-browser"><RemoteBrowser /></div>
 
       {isUser && (
         <section className="hp-section hp-actions">
