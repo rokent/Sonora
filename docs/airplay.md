@@ -105,6 +105,9 @@ back within about 5 seconds of the party ending.
   - `AirPlay off: no mDNS (avahi) available`: the container's avahi did not
     start (see the `AirPlay:` lines at the top of the log), or a mounted host
     D-Bus has no avahi on it.
+    Also fixed automatically: a `/data` owner uid with no `/etc/passwd`
+    entry in the image (1000, Unraid's 99) is given one at startup, because
+    D-Bus refuses a uid it cannot name.
   - `not restarting it`: that receiver exited 5 times in a row right after
     starting. Restart Sonora after fixing the cause (usually a port in
     5100-5199 taken by something else).

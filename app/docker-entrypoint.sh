@@ -70,6 +70,16 @@ if [ "$(id -u)" = 0 ]; then
     if [ -f /data/options.json ]; then
         chown "$owner:$group" /data/options.json
     fi
+    # The system D-Bus refuses a uid with no passwd entry, which turns AirPlay
+    # off without a word. Give the data owner an entry if the image has none;
+    # a read-only root file system just keeps things as they were.
+    if ! getent group "$group" >/dev/null 2>&1; then
+        { echo "sonora-data:x:$group:" >>/etc/group; } 2>/dev/null || true
+    fi
+    if ! getent passwd "$owner" >/dev/null 2>&1; then
+        { echo "sonora-data:x:$owner:$group:Sonora:/data:/usr/sbin/nologin" \
+            >>/etc/passwd; } 2>/dev/null || true
+    fi
     exec setpriv --reuid="$owner" --regid="$group" --clear-groups -- "$@"
 fi
 exec "$@"
