@@ -94,12 +94,28 @@ export function errorText(t, error) {
 // -- the sheet ----------------------------------------------------------------
 
 /** A panel over the page for one question. Escape or the backdrop closes it. */
+// Open sheets, oldest first: Escape closes only the topmost one, so a move
+// question over a preset sheet closes before the preset sheet does.
+const openSheets = []
+
 export function Sheet({ title, onClose, children, actions }) {
+  const close = useRef(onClose)
+  close.current = onClose
   useEffect(() => {
-    const key = (event) => { if (event.key === 'Escape') onClose?.() }
+    const me = {}
+    openSheets.push(me)
+    const key = (event) => {
+      if (event.key !== 'Escape' || openSheets[openSheets.length - 1] !== me) return
+      event.stopImmediatePropagation()
+      close.current?.()
+    }
     window.addEventListener('keydown', key)
-    return () => window.removeEventListener('keydown', key)
-  }, [onClose])
+    return () => {
+      window.removeEventListener('keydown', key)
+      const at = openSheets.indexOf(me)
+      if (at >= 0) openSheets.splice(at, 1)
+    }
+  }, [])
   return (
     <div className="hp-sheet" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) onClose?.() }}>
       <div className="hp-sheet__panel" role="dialog" aria-modal="true" aria-label={title}>

@@ -32,7 +32,7 @@ function useLeftNotice(partyId) {
   return shown ? { ...shown, room: zones[shown.zone]?.name || '' } : null
 }
 
-function Queue({ party, isUser }) {
+function Queue({ party }) {
   const { t } = useI18n()
   const { queueEpochs, partiesEpoch } = useSystem()
   const lead = party.speakers?.[0] || ''
@@ -91,7 +91,7 @@ function Queue({ party, isUser }) {
                   {[item.artist, who].filter(Boolean).join(' · ')}
                 </span>
               </span>
-              {(item.can_remove || isUser) && (
+              {item.can_remove && (
                 <button type="button" className="hp-btn hp-btn--small hp-btn--ghost" disabled={busy === index}
                         aria-label={t('home.queue.remove', { title: item.title || '' })}
                         onClick={() => remove(index)}>
@@ -274,7 +274,7 @@ export default function PartyView({ id, data, isUser }) {
         {isUser && <button type="button" role="tab" aria-selected={tab === 'rooms'} className="hp-tab" onClick={() => setTab('rooms')}>{t('home.tab.rooms')}</button>}
       </div>
       <section className="hp-section">
-        {tab === 'queue' && <Queue party={party} isUser={isUser} />}
+        {tab === 'queue' && <Queue party={party} />}
         {tab === 'add' && !paused && <AddSongs party={party} />}
         {tab === 'rooms' && isUser && <Rooms party={party} parties={data.parties} />}
       </section>

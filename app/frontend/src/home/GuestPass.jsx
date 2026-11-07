@@ -1,7 +1,6 @@
 // The guest pass: a QR code and a link that sign a guest in, and a way to
 // make a new one, which stops the old one working.
 import React, { useEffect, useState } from 'react'
-import QRCode from 'qrcode'
 import { useI18n } from '../i18n/index.jsx'
 import { withBase } from '../lib/base.js'
 import { homeApi } from './api.js'
@@ -34,7 +33,9 @@ export default function GuestPass() {
   useEffect(() => {
     if (!url) { setQr(''); return undefined }
     let live = true
-    QRCode.toDataURL(url, { margin: 1, width: 512, errorCorrectionLevel: 'M' })
+    // Loaded here, so the QR library is fetched only by this screen.
+    import('qrcode')
+      .then(({ default: QRCode }) => QRCode.toDataURL(url, { margin: 1, width: 512, errorCorrectionLevel: 'M' }))
       .then((data) => { if (live) setQr(data) })
       .catch(() => { if (live) setQr('') })
     return () => { live = false }
