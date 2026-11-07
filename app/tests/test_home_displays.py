@@ -153,6 +153,41 @@ async def test_create_open_link_then_me():
                                      "name": "Living Room TV"}
 
 
+async def test_display_cookie_is_cross_site_over_https():
+    made = await _create()
+    u = urlparse(made["url"])
+    tv = Client(main.app, scheme="https", host="sonora.local")
+    r = await tv.request("GET", f"{u.path}?{u.query}")
+    assert r.status == 302
+    cookie = r.set_cookies[0]
+    assert "SameSite=none" in cookie and "Secure" in cookie and "HttpOnly" in cookie
+
+
+async def test_display_cookie_behind_trusted_https_proxy(monkeypatch):
+    monkeypatch.setenv("SONORA_TRUST_PROXY", "1")
+    made = await _create()
+    u = urlparse(made["url"])
+    r = await client().request("GET", f"{u.path}?{u.query}", headers={"x-forwarded-proto": "https"})
+    cookie = r.set_cookies[0]
+    assert "SameSite=none" in cookie and "Secure" in cookie
+
+
+async def test_display_cookie_over_http_stays_lax():
+    made = await _create()
+    _, r = await _open(made["url"])
+    cookie = r.set_cookies[0]
+    assert "SameSite=lax" in cookie and "Secure" not in cookie
+
+
+async def test_user_cookies_stay_lax_over_https():
+    from backend.home.auth_routes import _set_cookie
+    from starlette.responses import Response
+    response = Response()
+    _set_cookie(response, "s", "v", 60, "https")
+    cookie = response.headers["set-cookie"]
+    assert "SameSite=lax" in cookie and "Secure" in cookie
+
+
 async def test_display_is_read_only():
     made = await _create()
     tv, _ = await _open(made["url"])

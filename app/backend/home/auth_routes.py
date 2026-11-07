@@ -61,9 +61,17 @@ def _safe_next(value: str | None) -> str:
     return "/"
 
 
-def _set_cookie(response: Response, name: str, value: str, max_age: int, scheme: str) -> None:
+def _set_cookie(response: Response, name: str, value: str, max_age: int, scheme: str,
+                *, cross_site: bool = False) -> None:
+    """``cross_site`` (a display session) is ``SameSite=None; Secure`` over
+    HTTPS, so the page still signs in when it is framed by another site (Home
+    Assistant's iframe card). Browsers refuse ``SameSite=None`` without
+    ``Secure``, so over plain HTTP it stays ``Lax``: there Home Assistant and
+    Sonora must be the same site (same host name, any port) for the card."""
+    secure = scheme == "https"
+    samesite = "none" if cross_site and secure else "lax"
     response.set_cookie(name, value, max_age=max_age, httponly=True,
-                        samesite="lax", secure=scheme == "https", path="/")
+                        samesite=samesite, secure=secure, path="/")
 
 
 def _principal(request: Request) -> Principal | None:
@@ -203,7 +211,7 @@ async def display_join(request: Request, token: str = ""):
     p = Principal("display", link["id"], link["name"])
     response = RedirectResponse("/tv?" + urlencode({"display": link["id"]}), status_code=302)
     _set_cookie(response, SESSION_COOKIE, sign_session(p, DISPLAY_MAX_AGE),
-                DISPLAY_MAX_AGE, scheme)
+                DISPLAY_MAX_AGE, scheme, cross_site=True)
     return response
 
 
