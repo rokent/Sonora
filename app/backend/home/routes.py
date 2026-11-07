@@ -270,7 +270,49 @@ async def _start(who: Principal, *, name: str | None, speakers: list[str] | None
         kwargs.update(name=name or f"{who.name}'s party", speakers=speakers or [])
     party = await _engine_call(engine().start(**kwargs))
     await changed()
+    tv = (preset or {}).get("tv")
+    if tv:
+        party = {**party, **_show_on_tv(tv, party["id"])}
     return party
+
+
+#: Preset TV shows still running; held so they are not garbage-collected.
+_tv_tasks: set[asyncio.Task] = set()
+
+
+def _show_on_tv(tv: dict, party_id: str) -> dict:
+    """Show a just-started preset party on the preset's TV without making the
+    start wait: an unknown TV or a bad mode is answered at once as
+    ``tv_error``; otherwise the show runs in the background (``tv:
+    "pending"``) and its outcome is broadcast as ``{"type": "tv_result"}``."""
+    from . import tvs  # lazy: keeps the TV code out of this module's import
+
+    try:
+        tvs.prepare(tv["tv_id"], tv.get("show"))
+    except tvs.TvError as exc:
+        return {"tv_error": exc.error}
+    task = asyncio.create_task(_show_in_background(tv, party_id))
+    _tv_tasks.add(task)
+    task.add_done_callback(_tv_tasks.discard)
+    return {"tv": "pending"}
+
+
+async def _show_in_background(tv: dict, party_id: str) -> None:
+    from . import tvs
+
+    error = None
+    try:
+        await tvs.show(tv["tv_id"], party_id, tv.get("show"))
+    except tvs.TvError as exc:
+        error = exc.error
+    except Exception:                                  # noqa: BLE001 - reported, never raised
+        log.exception("tvs: showing party %s on %s failed", party_id, tv.get("tv_id"))
+        error = "tv_failed"
+    try:
+        await _main()._fan_out({"type": "tv_result", "party": party_id, "tv_id": tv["tv_id"],
+                                "ok": error is None, "error": error})
+    except Exception:                                  # noqa: BLE001
+        log.exception("tvs: broadcasting the result for party %s failed", party_id)
 
 
 @router.get("/api/parties")

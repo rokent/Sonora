@@ -11,7 +11,7 @@ import inspect
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import Response
 
-from . import auth_routes, config_routes, ha, permissions, routes
+from . import auth_routes, config_routes, ha, permissions, routes, tv_routes
 
 #: Pages of Sonora Home's own that the interface routes by path: they are the
 #: same page shell Sonora serves at ``/``.
@@ -62,6 +62,7 @@ def install(app: FastAPI) -> None:
     app.include_router(routes.router)
     app.include_router(ha.router)
     app.include_router(config_routes.router)
+    app.include_router(tv_routes.router)
     app.include_router(pages)
     from . import media  # YouTube relay for speakers (Phase 2)
     app.include_router(media.router)
