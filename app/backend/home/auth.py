@@ -1,7 +1,8 @@
 """Who is asking: principals, signed sessions and the guest pass.
 
 A principal is a signed-in household member (``user``), someone let in with
-the guest pass (``guest``), or a machine such as Home Assistant (``service``).
+the guest pass (``guest``), a machine such as Home Assistant (``service``), or
+a TV screen let in with a display link (``display``, read-only).
 Sessions are stateless: ``base64url(json).hmac_sha256`` under a key kept in
 the data folder, so a restart signs nobody out. With no OIDC issuer set,
 Sonora behaves as it always did and every request is the local user.
@@ -29,7 +30,7 @@ SESSION_COOKIE = "sonora_session"
 
 @dataclass(frozen=True)
 class Principal:
-    kind: Literal["user", "guest", "service"]
+    kind: Literal["user", "guest", "service", "display"]
     id: str
     name: str
 
@@ -40,6 +41,10 @@ class Principal:
     @property
     def is_guest(self) -> bool:
         return self.kind == "guest"
+
+    @property
+    def is_display(self) -> bool:
+        return self.kind == "display"
 
 
 LOCAL = Principal("user", "local", "Local")
@@ -147,18 +152,34 @@ def sign_session(p: Principal, max_age: int) -> str:
     if p.is_guest:
         # Tied to the guest pass in force now: rotating it ends this session.
         payload["g"] = _generation(GuestPass().token())
+    elif p.is_display:
+        # Tied to the display link's token: deleting the link ends it.
+        payload["g"] = DisplayLinks().generation(p.id)
     return sign_payload(payload, max_age, "session")
 
 
 def read_session(value: str) -> Principal | None:
     data = read_payload(value, "session")
-    if not data or data.get("k") not in ("user", "guest", "service"):
+    if not data or data.get("k") not in ("user", "guest", "service", "display"):
         return None
     if not isinstance(data.get("id"), str) or not isinstance(data.get("n"), str):
         return None
     if data["k"] == "guest" and data.get("g") != _generation(GuestPass().token()):
         return None
+    if data["k"] == "display":
+        link = DisplayLinks()._raw(data["id"])
+        if link is None or data.get("g") != _generation(link["token_hash"]):
+            return None
+        # The link's current name, so a rename shows without a new session.
+        return Principal("display", data["id"], str(link.get("name", "")))
     return Principal(data["k"], data["id"], data["n"])
+
+
+def display_session_removed(value: str | None) -> bool:
+    """Whether ``value`` is a genuine display session whose link was deleted
+    (or replaced), so the TV can say so instead of asking it to sign in."""
+    data = read_payload(value or "", "session")
+    return bool(data) and data.get("k") == "display" and read_session(value or "") is None
 
 
 # --- who is asking -----------------------------------------------------
@@ -208,3 +229,121 @@ class GuestPass:
 
     def check(self, t: str) -> bool:
         return isinstance(t, str) and hmac.compare_digest(t.encode(), self.token().encode())
+
+
+# --- display links -----------------------------------------------------
+
+DISPLAY_MODES = ("video", "visualizer", "cover")
+_DISPLAY_FIELDS = ("id", "name", "party", "mode", "lyrics", "created")
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+class DisplayLinks:
+    """Long-lived links that let a TV screen in as a read-only ``display``.
+
+    Kept in ``displays.json`` as ``{id, name, token_hash, party, mode, lyrics,
+    created}``. Only a hash of each token is stored; the token itself is shown
+    once, when the link is made. Every method returns the public fields only.
+    """
+
+    def _path(self):
+        return home_dir() / "displays.json"
+
+    def _load(self) -> list[dict]:
+        found = read_json(self._path(), [])
+        return [d for d in found if isinstance(d, dict)] if isinstance(found, list) else []
+
+    def _save(self, links: list[dict]) -> None:
+        write_json(self._path(), links)
+
+    @staticmethod
+    def _public(link: dict) -> dict:
+        return {k: link.get(k) for k in _DISPLAY_FIELDS}
+
+    @staticmethod
+    def _check(fields: dict[str, Any]) -> dict[str, Any]:
+        """``fields`` cleaned, or ValueError naming the first bad one."""
+        out: dict[str, Any] = {}
+        if "name" in fields:
+            name = fields["name"]
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("name")
+            out["name"] = name.strip()[:40].strip()
+        if "party" in fields:
+            party = fields["party"]
+            if party is not None and (not isinstance(party, str) or not party
+                                      or len(party) > 64):
+                raise ValueError("party")
+            out["party"] = party
+        if "mode" in fields:
+            if fields["mode"] not in DISPLAY_MODES:
+                raise ValueError("mode")
+            out["mode"] = fields["mode"]
+        if "lyrics" in fields:
+            if not isinstance(fields["lyrics"], bool):
+                raise ValueError("lyrics")
+            out["lyrics"] = fields["lyrics"]
+        return out
+
+    def list(self) -> list[dict]:
+        return [self._public(d) for d in self._load()]
+
+    def _raw(self, link_id: str) -> dict | None:
+        for d in self._load():
+            if d.get("id") == link_id and isinstance(d.get("token_hash"), str):
+                return d
+        return None
+
+    def get(self, link_id: str) -> dict | None:
+        found = self._raw(link_id)
+        return self._public(found) if found else None
+
+    def create(self, name: str, party: str | None = None, mode: str = "visualizer",
+               lyrics: bool = False) -> tuple[dict, str]:
+        """Make a link; returns ``(public fields, token)``. The token is not
+        kept, so this is the only time it can be shown."""
+        fields = self._check({"name": name, "party": party, "mode": mode, "lyrics": lyrics})
+        token = secrets.token_urlsafe(32)
+        link = {"id": secrets.token_urlsafe(9), **fields,
+                "token_hash": _token_hash(token), "created": time.time()}
+        self._save([*self._load(), link])
+        return self._public(link), token
+
+    def update(self, link_id: str, **fields: Any) -> dict | None:
+        """Change name/party/mode/lyrics; None if there is no such link.
+        The token stays, so the TV's session survives an edit."""
+        clean = self._check({k: v for k, v in fields.items()
+                             if k in ("name", "party", "mode", "lyrics")})
+        links = self._load()
+        for d in links:
+            if d.get("id") == link_id:
+                d.update(clean)
+                self._save(links)
+                return self._public(d)
+        return None
+
+    def delete(self, link_id: str) -> bool:
+        links = self._load()
+        kept = [d for d in links if d.get("id") != link_id]
+        if len(kept) == len(links):
+            return False
+        self._save(kept)
+        return True
+
+    def by_token(self, token: str) -> dict | None:
+        if not isinstance(token, str) or not token:
+            return None
+        want = _token_hash(token)
+        for d in self._load():
+            if hmac.compare_digest(str(d.get("token_hash", "")), want):
+                return self._public(d)
+        return None
+
+    def generation(self, link_id: str) -> str | None:
+        """What a display session for ``link_id`` is tied to: a short hash of
+        the link's token hash. None when the link is gone."""
+        found = self._raw(link_id)
+        return _generation(found["token_hash"]) if found else None
