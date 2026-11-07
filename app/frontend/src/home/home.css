@@ -211,3 +211,6 @@
   .hp-sheet__panel { border-radius: 16px; }
   .hp-sheet__actions .hp-btn { flex: 0 0 auto; }
 }
+
+.hp-stack { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.hp-actions--row { flex-direction: row; flex-wrap: wrap; }

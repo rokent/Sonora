@@ -68,6 +68,8 @@ const initialState = {
   // refetches; and the last "a room left the party" notice.
   partiesEpoch: 0,
   lastPartyNotice: null,
+  // The outcome of a TV show that ran in the background.
+  lastTvResult: null,
 }
 
 // When a room's state arrived, on the page's own clock. Its position_age
@@ -230,6 +232,9 @@ function reducer(state, action) {
       return { ...state, partiesEpoch: state.partiesEpoch + 1 }
     case 'partyNotice':
       return { ...state, lastPartyNotice: { ...action.notice, at: Date.now() } }
+
+    case 'tvResult':
+      return { ...state, lastTvResult: { ...action.result, at: Date.now() } }
 
     case 'scanning':
       return { ...state, scanning: action.value }
@@ -419,6 +424,9 @@ export function SystemProvider({ children }) {
         } else if (message.type === 'parties') {
           // Sonora Home: a party started, ended, or changed speakers or queue.
           dispatch({ type: 'parties' })
+        } else if (message.type === 'tv_result') {
+          dispatch({ type: 'tvResult',
+                     result: { party: message.party, tv_id: message.tv_id, ok: !!message.ok, error: message.error || null } })
         } else if (message.type === 'party_notice') {
           dispatch({ type: 'partyNotice',
                      notice: { party: message.party, zone: message.zone, event: message.event } })

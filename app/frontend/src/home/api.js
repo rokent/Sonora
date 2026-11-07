@@ -27,6 +27,15 @@ export const homeApi = {
   rotateGuestPass: () => post('/api/guest-pass/rotate'),
   haTokens: () => request('/api/ha/tokens'),
   createHaToken: (label) => post('/api/ha/tokens', { label }),
+  tvs: () => request('/api/tvs'),
+  addTv: (body) => post('/api/tvs', body),
+  deleteTv: (tid) => request(`/api/tvs/${id(tid)}`, { method: 'DELETE' }),
+  pairTv: (tid) => post(`/api/tvs/${id(tid)}/pair`),
+  showOnTv: (tid, body) => post(`/api/tvs/${id(tid)}/show`, body),
+  displays: () => request('/api/displays'),
+  createDisplay: (body) => post('/api/displays', body),
+  updateDisplay: (did, body) => request(`/api/displays/${id(did)}`, { method: 'PUT', body }),
+  deleteDisplay: (did) => request(`/api/displays/${id(did)}`, { method: 'DELETE' }),
   deleteHaToken: (tid) => request(`/api/ha/tokens/${id(tid)}`, { method: 'DELETE' }),
 }
 

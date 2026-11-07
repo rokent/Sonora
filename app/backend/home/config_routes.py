@@ -29,4 +29,5 @@ async def home_config(request: Request) -> dict:
         url = _env("SONORA_NEKO_URL")
     elif principal.kind == "guest":
         url = _env("SONORA_NEKO_VIEW_URL")
-    return {"remote_browser": {"url": url} if url else None}
+    from . import analysis  # lazy: numpy-heavy
+    return {"remote_browser": {"url": url} if url else None, "visuals": analysis.visuals_mode()}
