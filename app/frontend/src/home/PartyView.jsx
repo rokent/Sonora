@@ -14,11 +14,11 @@ import SendSound from './SendSound.jsx'
 import ShowOnTv from './ShowOnTv.jsx'
 import RemoteBrowser from './RemoteBrowser.jsx'
 import VideoWindow from './VideoWindow.jsx'
-import { mediaKeyOf, transportAnchor } from '../lib/videoSync.js'
+import { transportAnchor } from '../lib/videoSync.js'
 import { useMe } from './useMe.js'
 import {
-  RoomChecklist, Sheet, VolumeSlider, errorText, go, holders, partyNowPlaying, partyRooms,
-  roomsBySystem, useMoveAsk,
+  RoomChecklist, Sheet, VolumeSlider, currentVideo, errorText, go, holders, partyNowPlaying, partyRooms,
+  roomsBySystem, useMoveAsk, usePartyQueue,
 } from './partyKit.jsx'
 
 const NOTICE_MS = 6000
@@ -55,42 +55,6 @@ function useAirPlayName(partyId) {
     return () => { live = false }
   }, [partyId, partiesEpoch])
   return name
-}
-
-/** The party's queue, fetched again whenever the speakers say it changed. */
-function usePartyQueue(party) {
-  const { t } = useI18n()
-  const { queueEpochs, partiesEpoch } = useSystem()
-  const lead = party?.speakers?.[0] || ''
-  const partyId = party?.id || ''
-  const [queue, setQueue] = useState(null)
-  const [error, setError] = useState('')
-  const [nudge, setNudge] = useState(0)
-  const epoch = queueEpochs[lead] || 0
-
-  useEffect(() => {
-    if (!partyId) return undefined
-    if (!lead) { setQueue({ items: [], start: 0 }); return undefined }
-    let live = true
-    homeApi.partyQueue(partyId)
-      .then((r) => { if (live) { setQueue(r); setError('') } })
-      .catch((exc) => { if (live) setError(errorText(t, exc)) })
-    return () => { live = false }
-  }, [partyId, lead, epoch, partiesEpoch, nudge, t])
-
-  return { queue, error, setError, reload: () => setNudge((n) => n + 1) }
-}
-
-/** The YouTube video the speakers are playing, if they are playing one of ours. */
-function currentVideo(transport, queue) {
-  const uri = transport?.track_uri || ''
-  if (!mediaKeyOf(uri)) return null
-  const items = queue?.items || []
-  const byUri = items.find((item) => item.uri === uri && item.video_id)
-  if (byUri) return byUri
-  const at = (transport?.track_number || 0) - 1 - (queue?.start || 0)
-  const byNumber = items[at]
-  return byNumber?.video_id ? byNumber : null
 }
 
 const VIDEO_HIDDEN_KEY = 'sonora.videoHidden'

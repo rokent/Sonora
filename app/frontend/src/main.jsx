@@ -9,6 +9,8 @@ import ErrorBoundary from './components/ErrorBoundary.jsx'
 
 // The party page loads on demand, outside the themes' bundle.
 const PartyApp = React.lazy(() => import('./home/PartyApp.jsx'))
+// So does TV mode (and the visualizer it may load).
+const TvApp = React.lazy(() => import('./home/TvApp.jsx'))
 import { SystemProvider } from './lib/store.jsx'
 import { ThemeProvider, useTheme } from './lib/theme.jsx'
 import { I18nProvider } from './i18n/index.jsx'
@@ -23,12 +25,15 @@ function Guarded() {
 }
 
 // Which screen this address is: the guest join page (no system behind it),
-// the party screens, or the household's own controller.
+// the party screens, TV mode, or the household's own controller.
 function Routed() {
   const path = window.location.pathname.replace(/\/+$/, '')
   const local = BASE && path.startsWith(BASE) ? path.slice(BASE.length) : path
   if (local === '/party' || local.startsWith('/party/')) {
     return <ErrorBoundary><React.Suspense fallback={null}><PartyApp /></React.Suspense></ErrorBoundary>
+  }
+  if (local === '/tv') {
+    return <ErrorBoundary><React.Suspense fallback={null}><TvApp /></React.Suspense></ErrorBoundary>
   }
   return <Guarded />
 }

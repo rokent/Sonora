@@ -36,6 +36,8 @@ export const homeApi = {
   pairTv: (tid) => post(`/api/tvs/${id(tid)}/pair`),
   showOnTv: (tid, body) => post(`/api/tvs/${id(tid)}/show`, body),
   displays: () => request('/api/displays'),
+  // A display reads its own link; a household member names one (?display=).
+  displayMe: (did = '') => request(`/api/displays/me${did ? `?display=${id(did)}` : ''}`),
   createDisplay: (body) => post('/api/displays', body),
   updateDisplay: (did, body) => request(`/api/displays/${id(did)}`, { method: 'PUT', body }),
   deleteDisplay: (did) => request(`/api/displays/${id(did)}`, { method: 'DELETE' }),
