@@ -67,6 +67,7 @@ GUEST: list[tuple[str, re.Pattern]] = [
     _rule("POST", rf"/api/parties/{_SEG}/youtube"),
     _rule("POST", rf"/api/parties/{_SEG}/files"),
     _rule("GET", r"/api/youtube/search"),
+    _rule("GET", r"/api/airplay/receivers"),      # the AirPlay names help
     _rule("DELETE", rf"/api/parties/{_SEG}/queue/{_SEG}"),
     _rule("POST", rf"/api/parties/{_SEG}/transport/(play|pause|next|previous)"),
     _rule("POST", rf"/api/parties/{_SEG}/volume"),

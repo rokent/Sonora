@@ -152,8 +152,27 @@ async def _notify(message: dict) -> None:
     await changed()
 
 
+#: Called (no arguments, not awaited) after every party change is announced:
+#: the AirPlay receivers follow the party list (``airplay.py``).
+_change_listeners: list = []
+
+
+def on_change(callback) -> None:
+    _change_listeners.append(callback)
+
+
+def off_change(callback) -> None:
+    if callback in _change_listeners:
+        _change_listeners.remove(callback)
+
+
 async def changed() -> None:
     await _main()._fan_out({"type": "parties"})
+    for callback in list(_change_listeners):
+        try:
+            callback()
+        except Exception:                                  # noqa: BLE001
+            log.exception("parties: a change listener failed")
 
 
 def _household_of(uuid: str) -> str | None:

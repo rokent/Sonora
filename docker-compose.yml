@@ -27,6 +27,9 @@ services:
       # If a speaker will not play YouTube items, set aac (needs ffmpeg, which
       # the image has; no seeking). See docs/youtube.md.
       # SONORA_YOUTUBE_FORMAT: m4a
+      # AirPlay receivers (each running party and room as an AirPlay speaker,
+      # ports 5100-5199 TCP/UDP + mDNS; see docs/airplay.md). 0 turns them off.
+      # SONORA_AIRPLAY: 0
     volumes:
       - ./sonora-data:/data
 

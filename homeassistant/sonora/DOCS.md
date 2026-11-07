@@ -40,6 +40,10 @@ If something else on the machine already uses one of them, change it on the
 app's **Configuration** tab and restart the app. The page in Home Assistant's
 sidebar doesn't use either port, so it keeps working whatever you choose.
 
+AirPlay receivers (each running party and each room as an AirPlay speaker)
+use ports 5100-5199 (TCP and UDP) and mDNS. Turn **AirPlay receivers** off on
+the **Configuration** tab if you don't want them.
+
 ## Your data
 
 Sonora keeps its sign-ins to Sonos and to music services, and any themes you
