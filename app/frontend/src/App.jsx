@@ -8,6 +8,7 @@ import LayoutShell from './parts/LayoutShell.jsx'
 const PartyApp = lazy(() => import('./home/PartyApp.jsx'))
 import { withBase } from './lib/base.js'
 import { useMe } from './home/useMe.js'
+import { controllerRedirect, showPartiesButton } from './home/access.js'
 import { useI18n } from './i18n/index.jsx'
 import './home/home.css'
 
@@ -23,7 +24,15 @@ export default function App() {
   if (me.loading) return <div style={{ minHeight: '100%', background: 'var(--t-bg, #f6f6f7)' }} />
   // A guest has the party screens and nothing else.
   if (me.principal?.kind === 'guest') return <Suspense fallback={null}><PartyApp /></Suspense>
-  return <Household partiesLink={!!(me.auth && me.principal?.kind === 'user')} />
+  // A TV's display session has no controller: it shows TV mode.
+  const away = controllerRedirect({ principalKind: me.principal?.kind || null })
+  if (away) return <Redirect to={away} />
+  return <Household partiesLink={showPartiesButton({ auth: me.auth, principalKind: me.principal?.kind || null })} />
+}
+
+function Redirect({ to }) {
+  useEffect(() => { window.location.replace(withBase(to)) }, [to])
+  return <div style={{ minHeight: '100%', background: 'var(--t-bg, #f6f6f7)' }} />
 }
 
 function PartiesButton() {
