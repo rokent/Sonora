@@ -17,13 +17,14 @@ of those; copies before them (there before the party) have no adder.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from . import files, media, ratelimit, youtube
@@ -769,10 +770,24 @@ async def attribution(request: Request, call_next):
             body = None
         response = await call_next(request)
         who = getattr(request.state, "principal", None)
-        # Only an add at the end: the party matches adders to a URI's last
-        # copies, which a Play Next or a drop between rows would break.
         added = (response.status_code == 200 and isinstance(body, dict) and body.get("enqueue")
                  and not body.get("replace") and body.get("uri"))
+        answer = None
+        if added:
+            # The route's answer carries where the speaker put the song
+            # (``FirstTrackNumberEnqueued``), the only right place for an
+            # album, a Play Next or a drop between rows. Read here, it is
+            # sent on unchanged.
+            content = b"".join([chunk async for chunk in response.body_iterator])
+            sent = Response(content=content, status_code=response.status_code)
+            sent.raw_headers = list(response.raw_headers)
+            response = sent
+            try:
+                answer = json.loads(content)
+            except ValueError:
+                answer = None
+        # Only an add at the end: the party matches adders to a URI's last
+        # copies, which a Play Next or a drop between rows would break.
         if added and who is not None and not body.get("next") and not body.get("position"):
             engine().record_add(party_id, str(body["uri"]), who)
             await changed()
@@ -783,6 +798,7 @@ async def attribution(request: Request, call_next):
                 async with _queue_lock:
                     position = body.get("position")
                     await engine().play_added(party_id, str(body["uri"]),
+                                              answer if isinstance(answer, dict) else None,
                                               position=position if isinstance(position, int) and position > 0 else None)
             except Exception:                          # noqa: BLE001 - Sonora's route answered already
                 log.exception("parties: switching %s's party to its queue failed", m.group(1))

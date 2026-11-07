@@ -524,3 +524,62 @@ async def test_sonora_enqueue_on_a_party_off_its_queue_plays_the_added_track(rig
     assert rig.cmds.calls == [("add", "B", "x-file:9"), ("set_source", "A", "x-rincon-queue:A#0"),
                               ("seek_track", "A", 1), ("play", "A")]
     assert routes.engine().get(pid)["speakers"] == ["A", "B"]
+
+
+def _answers(rig, monkeypatch, first, tracks):
+    """The speaker takes in ``tracks`` items (an album) and says the first
+    landed at ``first``; the queue it lists is not consulted."""
+    seen = []
+
+    async def add(zone, uri, metadata="", *, next_=False, position=0):
+        seen.append((zone, uri, next_))
+        rig.cmds.calls.append(("add", zone, uri))
+        for n in range(tracks):
+            rig.cmds._q(zone).append({"id": "Q:0/x", "uri": f"{uri}#{n}", "title": uri})
+        return {"FirstTrackNumberEnqueued": str(first), "NumTracksAdded": str(tracks),
+                "NewQueueLength": str(len(rig.cmds._q(zone)))}
+    monkeypatch.setattr(rig.cmds, "add_to_queue", add)
+    return seen
+
+
+@pytest.mark.parametrize("extra", [{}, {"next": True}])
+async def test_sonora_enqueue_seeks_where_the_speaker_says(rig, monkeypatch, extra):
+    pid = (await _start()).json()["id"]
+    rig.ctl.queues["A"] += [{"id": f"Q:0/{i}", "uri": f"x-file:{i}", "title": ""} for i in (1, 2, 3)]
+    _on(rig, "A", AIRPLAY)
+    seen = _answers(rig, monkeypatch, 2, 3)
+    rig.cmds.calls.clear()
+    r = await client(USER).request("POST", "/api/zones/A/source",
+                                   {"uri": "x-rincon-playlist:album", "metadata": "<m/>", "enqueue": True, **extra})
+    assert r.status == 200
+    assert r.json() == {"ok": True, "FirstTrackNumberEnqueued": "2", "NumTracksAdded": "3", "NewQueueLength": "6"}
+    assert seen == [("A", "x-rincon-playlist:album", bool(extra))]
+    assert rig.cmds.calls[1:] == [("set_source", "A", "x-rincon-queue:A#0"), ("seek_track", "A", 2), ("play", "A")]
+    assert routes.engine().get(pid)["speakers"] == ["A", "B"]
+
+
+async def test_sonora_replace_or_play_now_never_switches_through_the_party(rig, monkeypatch):
+    await _start()
+    _on(rig, "A", AIRPLAY)
+    called = []
+
+    async def spy(*a, **k):
+        called.append(a)
+        return False
+    monkeypatch.setattr(routes.engine(), "play_added", spy)
+
+    async def replace_queue(zone, uri, metadata=""):
+        rig.cmds.calls.append(("replace", zone, uri))
+
+    async def play_now(zone, uri, metadata="", kind=""):
+        rig.cmds.calls.append(("play_now", zone, uri))
+    monkeypatch.setattr(rig.cmds, "replace_queue", replace_queue, raising=False)
+    monkeypatch.setattr(rig.cmds, "play_now", play_now, raising=False)
+    u = client(USER)
+    assert (await u.request("POST", "/api/zones/A/source",
+                            {"uri": "x-file:1", "metadata": "<m/>", "replace": True})).status == 200
+    assert (await u.request("POST", "/api/zones/A/source",
+                            {"uri": "x-file:2", "metadata": "<m/>"})).status == 200
+    assert called == []
+    assert [c[0] for c in rig.cmds.calls[-2:]] == ["replace", "play_now"]
+

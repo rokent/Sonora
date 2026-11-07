@@ -62,6 +62,13 @@ _TOPOLOGY_MESSAGES = ("snapshot", "zone")
 #: stream URL under this path; the party put it there itself.
 _LIVE_PATH = "/api/home/live/"
 
+#: Seconds after the party switched its lead to its queue for an added song
+#: during which the lead counts as on its queue whatever the controller
+#: still reports, unless the speaker reports the queue sooner: the next add
+#: right behind the first only queues, rather than switching again and
+#: skipping the first song.
+SWITCH_GRACE = 10.0
+
 
 class Actor(Protocol):
     """Whoever acts on a party: anything with an id, a name and whether it
@@ -204,6 +211,10 @@ class PartyEngine:
         #: topology events Sonora's own regrouping brings are not read as
         #: another app's doing.
         self._lock = asyncio.Lock()
+        #: ``{party: time.monotonic()}`` of the party's last switch of its
+        #: lead to its queue, until the speaker reports the queue. Not kept
+        #: in the file: a restart is longer than the window.
+        self._switched: dict[str, float] = {}
         self._load()
 
     # -- persistence -----------------------------------------------------------
@@ -688,10 +699,14 @@ class PartyEngine:
         some other source (a phone over AirPlay, a station, the TV), point
         it at the queue and play from the added track, so the guest hears
         it and Next moves through the party's queue, not the other source.
-        A lead already on its queue, or playing live sound from Sonora, is
-        left alone. Its place is
+        This starts playback even when the party was paused: the guest's
+        song is what plays now. A lead already on its queue, or playing
+        live sound from Sonora, is left alone, as is one the party switched
+        less than ``SWITCH_GRACE`` seconds ago and has not yet heard back
+        from (the next add right behind the first only queues). Its place is
         ``position``, else the speaker's answer to the add (``result``),
-        else the added URI's last copy in the queue. Says whether the lead
+        else the added URI's last copy in the queue. ``result`` wins over
+        ``position``: it is where the speaker put the song. Says whether the lead
         was switched.
 
         Done under the engine's lock, and the party's own source is the
@@ -707,11 +722,15 @@ class PartyEngine:
             loaded = self._media_of(lead)
             if loaded is None or loaded == queue:
                 return False
+            switched = self._switched.get(party_id)
+            if switched is not None and time.monotonic() - switched < SWITCH_GRACE:
+                return False
             if _LIVE_PATH in loaded:
                 # Live sound from Sonora: the live hub puts the party's queue
                 # back on when the sender stops, so the song only waits there.
                 return False
-            index = position or _first_track(result) or await self._position_of(lead, uri)
+            index = _first_track(result) or position or await self._position_of(lead, uri)
+            self._switched[party_id] = time.monotonic()
             party.own_source = None
             party.seen = False
             party.state = "playing"
@@ -839,6 +858,8 @@ class PartyEngine:
             if uri is None:
                 continue
             if self._plays_its_own(party, uri):
+                if uri == f"x-rincon-queue:{party.speakers[0]}#0":
+                    self._switched.pop(party.id, None)
                 if not party.seen:
                     party.seen = True
                     changed = True
@@ -854,6 +875,7 @@ class PartyEngine:
             party.volumes = {}
             party.state = "paused"
             party.seen = False
+            self._switched.pop(party.id, None)
             keeping.append((party, lead))
             changed = True
         if notices or changed:

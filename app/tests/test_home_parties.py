@@ -690,6 +690,7 @@ def test_a_song_added_off_the_queue_is_found_in_the_queue(rig, monkeypatch):
     engine, pid = _party_on_airplay(rig)
     run(engine.play_added(pid, "x-file:9"))
     assert ("seek_track", "A", 3) in rig.commands.calls     # the copy just added: the last
+    engine._switched.clear()                                # as if the switch window had passed
     run(engine.play_added(pid, "x-file:1", position=2))
     assert ("seek_track", "A", 2) in rig.commands.calls
 
@@ -846,3 +847,33 @@ def test_a_song_added_during_live_sound_only_queues(rig):
     _plays(rig, "A", "x-rincon-mp3radio://10.0.0.5:8000/api/home/live/k1.mp3")
     assert run(engine.play_added(pid, "x-file:9", {"FirstTrackNumberEnqueued": "3"})) is False
     assert rig.commands.calls == []
+
+
+def test_adds_right_after_a_switch_only_queue(rig, monkeypatch):
+    # The controller still reports AirPlay just after the party's own switch:
+    # a second add must not switch again and skip the first song.
+    engine, pid = _party_on_airplay(rig)
+    clock = [1000.0]
+    monkeypatch.setattr(parties.time, "monotonic", lambda: clock[0])
+    assert run(engine.play_added(pid, "x-file:9", {"FirstTrackNumberEnqueued": "3"})) is True
+    assert run(engine.play_added(pid, "x-file:10", {"FirstTrackNumberEnqueued": "4"})) is False
+    assert rig.commands.calls == [("set_source", "A", "x-rincon-queue:A#0"),
+                                  ("seek_track", "A", 3), ("play", "A")]
+    # once the window has passed, a lead still on another source is switched again
+    clock[0] += parties.SWITCH_GRACE + 1
+    rig.commands.calls.clear()
+    assert run(engine.play_added(pid, "x-file:11", {"FirstTrackNumberEnqueued": "5"})) is True
+    assert ("seek_track", "A", 5) in rig.commands.calls
+
+
+def test_the_queue_reported_ends_the_window(rig, monkeypatch):
+    engine, pid = _party_on_airplay(rig)
+    monkeypatch.setattr(parties.time, "monotonic", lambda: 1000.0)
+    run(engine.play_added(pid, "x-file:9", {"FirstTrackNumberEnqueued": "3"}))
+    _plays(rig, "A", "x-rincon-queue:A#0")
+    run(engine.on_state({"type": "zone"}))
+    _plays(rig, "A", "x-sonos-htastream:A:spdif")     # someone else, later: the party lets go
+    run(engine.on_state({"type": "zone"}))
+    assert [n["zone"] for n in rig.notices] == ["A", "B"]
+    assert pid not in engine._switched
+
