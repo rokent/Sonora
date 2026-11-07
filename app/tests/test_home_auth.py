@@ -151,9 +151,10 @@ async def test_guest_join_sets_cookie(monkeypatch):
     assert (await c.request("POST", "/auth/guest", {"token": token, "name": "  "})).status == 400
 
 
-async def test_me_without_session_is_401_when_enabled(monkeypatch):
+async def test_me_without_session_is_null_principal_when_enabled(monkeypatch):
     enable(monkeypatch)
-    assert (await Client(make_app()).request("GET", "/api/me")).status == 401
+    r = await Client(make_app()).request("GET", "/api/me")
+    assert r.status == 200 and r.json() == {"auth": True, "principal": None}
 
 
 async def test_me_when_auth_disabled_is_local():
@@ -172,7 +173,7 @@ async def test_guest_pass_is_for_users_only(monkeypatch):
     u = Client(make_app())
     u.cookies["sonora_session"] = sign_session(Principal("user", "u1", "Ana"), 60)
     got = (await u.request("GET", "/api/guest-pass")).json()
-    assert got["token"] == token and token in got["url"]
+    assert got["token"] == token and "token=" + token in got["url"]
     new = (await u.request("POST", "/api/guest-pass/rotate")).json()["token"]
     assert new != token and not GuestPass().check(token)
 
@@ -295,3 +296,60 @@ async def test_discovery_is_cached(monkeypatch):
     await auth_routes._discover()
     await auth_routes._discover()
     assert calls == ["https://idp.example/.well-known/openid-configuration"]
+
+
+def test_oidc_cookie_is_not_a_session():
+    oidc = auth.sign_payload({"k": "user", "id": "u1", "n": "Ana"}, 60, "oidc")
+    assert read_session(oidc) is None
+    session = sign_session(Principal("user", "u1", "Ana"), 60)
+    assert auth.read_payload(session, "oidc") is None
+
+
+async def test_callback_rejects_a_session_as_login_state(monkeypatch):
+    enable(monkeypatch)
+    patch_oidc(monkeypatch, {"sub": "u-1"})
+    c = Client(make_app())
+    c.cookies["sonora_oidc"] = auth.sign_payload({"s": "x", "v": "v", "next": "/"}, 60, "session")
+    assert (await c.request("GET", "/auth/callback?code=abc&state=x")).status == 400
+
+
+async def test_rotating_the_pass_ends_guest_sessions(monkeypatch):
+    enable(monkeypatch)
+    c = Client(make_app())
+    await c.request("POST", "/auth/guest", {"token": GuestPass().token(), "name": "Ana"})
+    assert (await c.request("GET", "/api/me")).json()["principal"]["kind"] == "guest"
+    GuestPass().rotate()
+    assert (await c.request("GET", "/api/me")).json()["principal"] is None
+    # Users are unaffected by rotation.
+    u = sign_session(Principal("user", "u1", "Ana"), 60)
+    GuestPass().rotate()
+    assert read_session(u) == Principal("user", "u1", "Ana")
+
+
+def test_loose_key_permissions_are_tightened(home):
+    sign_session(LOCAL, 60)
+    key = home / "home" / "secret.key"
+    key.chmod(0o644)
+    auth._key_cache.clear()
+    sign_session(LOCAL, 60)
+    assert key.stat().st_mode & 0o777 == 0o600
+
+
+def test_key_is_cached_in_memory(home):
+    sign_session(LOCAL, 60)
+    key = home / "home" / "secret.key"
+    first = key.read_bytes()
+    key.write_bytes(b"x" * 32)  # a swap on disk is not picked up mid-run
+    value = sign_session(LOCAL, 60)
+    key.write_bytes(first)
+    assert read_session(value) == LOCAL
+
+
+def test_write_json_is_private_and_leaves_no_temp(tmp_path):
+    from backend.home.store import read_json, write_json
+    path = tmp_path / "a.json"
+    write_json(path, {"x": 1})
+    write_json(path, {"x": 2})
+    assert read_json(path, None) == {"x": 2}
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert [p.name for p in tmp_path.iterdir()] == ["a.json"]

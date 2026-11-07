@@ -135,7 +135,7 @@ async def login(request: Request, next: str | None = None):
         "code_challenge_method": "S256",
     })
     response = RedirectResponse(f"{meta['authorization_endpoint']}?{query}", status_code=302)
-    cookie = sign_payload({"s": state, "v": verifier, "next": _safe_next(next)}, OIDC_MAX_AGE)
+    cookie = sign_payload({"s": state, "v": verifier, "next": _safe_next(next)}, OIDC_MAX_AGE, "oidc")
     _set_cookie(response, OIDC_COOKIE, cookie, OIDC_MAX_AGE, scheme)
     return response
 
@@ -145,7 +145,7 @@ async def callback(request: Request, code: str = "", state: str = ""):
     if not auth_enabled():
         raise HTTPException(404, "Sign-in is not enabled")
     scheme, host = _origin(request)
-    saved = read_payload(request.cookies.get(OIDC_COOKIE, ""))
+    saved = read_payload(request.cookies.get(OIDC_COOKIE, ""), "oidc")
     if (not saved or not code or not state
             or not secrets.compare_digest(str(saved.get("s", "")), state)):
         raise HTTPException(400, "Sign-in expired, try again")
@@ -202,10 +202,9 @@ def _dump(p: Principal) -> dict:
 
 @router.get("/api/me")
 async def me(request: Request):
+    """Public: the frontend asks it to decide whether to send you to login."""
     p = _principal(request)
-    if p is None:
-        raise HTTPException(401, "Sign in required")
-    return {"auth": auth_enabled(), "principal": _dump(p)}
+    return {"auth": auth_enabled(), "principal": _dump(p) if p else None}
 
 
 @router.get("/api/guest-pass")
@@ -213,7 +212,7 @@ async def guest_pass(request: Request):
     _require_user(request)
     scheme, host = _origin(request)
     token = GuestPass().token()
-    return {"token": token, "url": f"{scheme}://{host}/join?{urlencode({'t': token})}"}
+    return {"token": token, "url": f"{scheme}://{host}/join?{urlencode({'token': token})}"}
 
 
 @router.post("/api/guest-pass/rotate")
@@ -221,4 +220,4 @@ async def guest_pass_rotate(request: Request):
     _require_user(request)
     scheme, host = _origin(request)
     token = GuestPass().rotate()
-    return {"token": token, "url": f"{scheme}://{host}/join?{urlencode({'t': token})}"}
+    return {"token": token, "url": f"{scheme}://{host}/join?{urlencode({'token': token})}"}

@@ -15,6 +15,7 @@ import hmac
 import json
 import os
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
@@ -57,19 +58,50 @@ def auth_enabled() -> bool:
 
 # --- signing -----------------------------------------------------------
 
+_key_cache: dict[str, bytes] = {}
+
+
 def _key() -> bytes:
+    """The signing key, made on first use. Created through a private temp file
+    and a link, so two starters never see a half-written or differing key."""
     path = home_dir() / "secret.key"
+    cached = _key_cache.get(str(path))
+    if cached is not None:
+        return cached
+    key = None
     try:
-        key = path.read_bytes()
-        if len(key) == 32:
-            return key
+        found = path.read_bytes()
+        if len(found) == 32:
+            key = found
     except OSError:
         pass
-    key = secrets.token_bytes(32)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(key)
-    os.chmod(path, 0o600)
+    if key is None:
+        key = secrets.token_bytes(32)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix="secret.key.")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(key)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                # Another start won; use its key (or replace a damaged one).
+                found = path.read_bytes()
+                if len(found) == 32:
+                    key = found
+                else:
+                    os.replace(tmp, path)
+                    tmp = ""
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+    if path.stat().st_mode & 0o077:
+        os.chmod(path, 0o600)
+    _key_cache[str(path)] = key
     return key
 
 
@@ -81,37 +113,50 @@ def _unb64(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
-def sign_payload(payload: dict[str, Any], max_age: int) -> str:
-    body = _b64(json.dumps({**payload, "exp": time.time() + max_age}).encode())
+def sign_payload(payload: dict[str, Any], max_age: int, typ: str) -> str:
+    """Sign ``payload`` for one purpose (``typ``), so a value made for one use
+    (the login-state cookie) is never accepted for another (a session)."""
+    body = _b64(json.dumps({**payload, "typ": typ, "exp": time.time() + max_age}).encode())
     mac = hmac.new(_key(), body.encode(), hashlib.sha256).digest()
     return f"{body}.{_b64(mac)}"
 
 
-def read_payload(value: str) -> dict[str, Any] | None:
-    """The payload of a value from ``sign_payload``, or None if it was
-    altered, is malformed or has expired."""
+def read_payload(value: str, typ: str) -> dict[str, Any] | None:
+    """The payload of a value from ``sign_payload`` made for ``typ``, or None
+    if it was altered, is malformed, is for another purpose or has expired."""
     try:
         body, _, sig = value.partition(".")
         want = hmac.new(_key(), body.encode(), hashlib.sha256).digest()
         if not hmac.compare_digest(want, _unb64(sig)):
             return None
         data = json.loads(_unb64(body))
-        if not isinstance(data, dict) or float(data["exp"]) < time.time():
+        if (not isinstance(data, dict) or data.get("typ") != typ
+                or float(data["exp"]) < time.time()):
             return None
         return data
     except (ValueError, KeyError, TypeError):
         return None
 
 
+def _generation(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
 def sign_session(p: Principal, max_age: int) -> str:
-    return sign_payload({"k": p.kind, "id": p.id, "n": p.name}, max_age)
+    payload: dict[str, Any] = {"k": p.kind, "id": p.id, "n": p.name}
+    if p.is_guest:
+        # Tied to the guest pass in force now: rotating it ends this session.
+        payload["g"] = _generation(GuestPass().token())
+    return sign_payload(payload, max_age, "session")
 
 
 def read_session(value: str) -> Principal | None:
-    data = read_payload(value)
+    data = read_payload(value, "session")
     if not data or data.get("k") not in ("user", "guest", "service"):
         return None
     if not isinstance(data.get("id"), str) or not isinstance(data.get("n"), str):
+        return None
+    if data["k"] == "guest" and data.get("g") != _generation(GuestPass().token()):
         return None
     return Principal(data["k"], data["id"], data["n"])
 
