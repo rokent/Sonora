@@ -422,3 +422,145 @@ def test_live_urls_are_public():
     assert permissions.allowed(None, "GET", "/api/home/live/abc.mp3")
     assert permissions.allowed(None, "HEAD", "/api/home/live/abc.mp3")
     assert not permissions.allowed(None, "POST", "/api/home/live/abc.mp3")
+
+
+# --- review fixes -----------------------------------------------------------
+
+
+async def test_a_listener_finishes_after_end_even_with_data_pending():
+    t = make_hub()
+    s = await t.hub.start(target=("party", "p1"), source_name="x", by="u")
+    gen = s.listen()
+    await s.feed(b"\x09" * 100)
+    await _settle()                  # the pump has pushed it; nobody read yet
+    await s.end("test")
+    got = []
+
+    async def drain():
+        async for chunk in gen:
+            got.append(chunk)
+    await asyncio.wait_for(drain(), 1)
+    assert b"".join(got) == b"\x09" * 100
+
+
+class Gate:
+    def __init__(self):
+        self.open = asyncio.Event()
+
+
+async def test_a_start_waits_for_a_resume_under_way_and_reuses_its_point():
+    t = make_hub()
+    gate = Gate()
+    plain_seek = t.commands.seek_track
+
+    async def slow_seek(zone, index):
+        await plain_seek(zone, index)
+        await gate.open.wait()
+    t.commands.seek_track = slow_seek
+
+    s1 = await t.hub.start(target=("party", "p1"), source_name="A", by="u")
+    # the transport model still shows the live stream (events lag)
+    t.ctl.zones["RINCON_A"].transport = transport(track=1, uri=f"x-rincon-mp3radio://x/{s1.key}")
+    t.clock.now += 9
+    idle = asyncio.ensure_future(s1.check_idle())
+    await _settle()
+    assert [c[0] for c in t.commands.calls] == ["play_now", "seek_track"]
+    second = asyncio.ensure_future(t.hub.start(target=("party", "p1"), source_name="B", by="u"))
+    await _settle()
+    assert [c[0] for c in t.commands.calls] == ["play_now", "seek_track"]   # start waits
+    assert not second.done()
+    gate.open.set()
+    assert await asyncio.wait_for(idle, 1)
+    s2 = await asyncio.wait_for(second, 1)
+    assert [c[0] for c in t.commands.calls] == ["play_now", "seek_track", "seek_time", "play",
+                                                "play_now"]
+    point = t.hub._resume[("party", "p1")]
+    assert (point["track_no"], point["position"], point["playing"]) == (3, "0:01:05", True)
+    gate.open.set()
+    await s2.end("disconnected")
+    assert t.commands.calls[-3:] == [("seek_track", "RINCON_A", 3),
+                                     ("seek_time", "RINCON_A", "0:01:05"),
+                                     ("play", "RINCON_A")]
+
+
+async def test_a_resume_queued_behind_a_start_hands_its_point_to_the_new_session():
+    t = make_hub()
+    s1 = await t.hub.start(target=("party", "p1"), source_name="A", by="u")
+    point = t.hub._resume[("party", "p1")]
+    async with t.hub._lock:                  # a start holds the lock ...
+        t.hub._current[("party", "p1")] = s1  # (still current while it ends)
+        del t.hub._resume[("party", "p1")]
+        task = t.hub._schedule_resume(("party", "p1"), point)
+        await _settle()
+        assert t.commands.resumes() == []
+    await asyncio.wait_for(task, 1)          # ... and a session is on: no seek
+    assert t.commands.resumes() == []
+    assert t.hub._resume[("party", "p1")] == point
+    await s1.end("test")
+
+
+async def test_a_failed_replacement_resumes_the_stranded_queue():
+    t = make_hub()
+    old = await t.hub.start(target=("party", "p1"), source_name="A", by="u")
+
+    async def broken(args):
+        raise RuntimeError("no ffmpeg")
+    t.hub._spawn = broken
+    with pytest.raises(RuntimeError):
+        await t.hub.start(target=("party", "p1"), source_name="B", by="u")
+    assert old.ended and old.reason == "replaced"
+    for _ in range(20):
+        if t.commands.resumes():
+            break
+        await asyncio.sleep(0)
+    assert t.commands.resumes() == [("seek_track", "RINCON_A", 3),
+                                    ("seek_time", "RINCON_A", "0:01:05"),
+                                    ("play", "RINCON_A")]
+    assert t.hub.current(("party", "p1")) is None
+
+
+async def test_a_failed_play_now_resumes_after_the_start(monkeypatch):
+    t = make_hub()
+    old = await t.hub.start(target=("party", "p1"), source_name="A", by="u")
+
+    async def refuse(*_a, **_k):
+        raise OSError("speaker gone")
+    t.commands.play_now = refuse
+    with pytest.raises(OSError):
+        await asyncio.wait_for(t.hub.start(target=("party", "p1"), source_name="B", by="u"), 1)
+    for _ in range(20):
+        if t.commands.resumes():
+            break
+        await asyncio.sleep(0)
+    assert [c[0] for c in t.commands.resumes()] == ["seek_track", "seek_time", "play"]
+    assert old.ended
+
+
+async def test_an_encoder_that_will_not_stop_does_not_hold_end_up(monkeypatch):
+    monkeypatch.setattr(live, "_CLOSE_TIMEOUT", 0.05)
+    t = make_hub()
+
+    class Stuck(FakePipe):
+        async def close(self):
+            await asyncio.Event().wait()
+
+    async def spawn(args):
+        return Stuck(args)
+    t.hub._spawn = spawn
+    s = await t.hub.start(target=("party", "p1"), source_name="x", by="u")
+    await asyncio.wait_for(s.end("disconnected"), 1)
+    assert s.ended
+
+
+async def test_internal_ends_are_kept_referenced():
+    t = make_hub()
+    s = await t.hub.start(target=("party", "p1"), source_name="x", by="u")
+    await t.spawner.pipes[0].close()         # the encoder stops by itself
+    await _settle()
+    for _ in range(20):
+        if s.ended:
+            break
+        await asyncio.sleep(0)
+    assert s.ended and s.reason == "encoder_stopped"
+    await _settle()                          # done callbacks run a tick later
+    assert not s._ending                     # held while running, released after

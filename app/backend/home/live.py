@@ -47,6 +47,14 @@ BACKLOG = 64 * 1024
 #: The most analysis PCM held when the analyzer is not reading (~1.5 s).
 _ANALYSIS_BACKLOG = 64 * 1024
 _READ = 16 * 1024
+#: How long an encoder gets to exit on its own before it is killed, and how
+#: long ``end`` waits for any pipe at all, so a replacement under the hub's
+#: lock is never held up for long.
+_EXIT_GRACE = 0.5
+_CLOSE_TIMEOUT = 1.0
+#: How fresh a just-finished resume must be to be reused as the next
+#: session's resume point (the transport model lags the speaker's events).
+_JUST_RESUMED = 5.0
 #: End reasons after which the queue is not resumed.
 _NO_RESUME = frozenset({"replaced", "party_ended", "shutdown"})
 
@@ -103,7 +111,7 @@ class _FfmpegPipe:
         if stdin is not None and not stdin.is_closing():
             stdin.close()
         try:
-            await asyncio.wait_for(self._proc.wait(), 2)
+            await asyncio.wait_for(self._proc.wait(), _EXIT_GRACE)
         except TimeoutError:
             self._proc.kill()
             await self._proc.wait()
@@ -221,6 +229,13 @@ class LiveSession:
         self._listeners: set[_Listener] = set()
         self._tasks: list[asyncio.Task] = []
         self._write_lock = asyncio.Lock()
+        #: ``end`` calls started from inside the session, kept referenced.
+        self._ending: set[asyncio.Task] = set()
+
+    def _end_soon(self, reason: str) -> None:
+        task = asyncio.ensure_future(self.end(reason))
+        self._ending.add(task)
+        task.add_done_callback(self._ending.discard)
 
     def as_dict(self) -> dict:
         return {"key": self.key, "target": {"kind": self.target[0], "id": self.target[1]},
@@ -259,7 +274,7 @@ class LiveSession:
             log.exception("live: reading the encoder failed")
         if not self.ended:
             # The encoder stopped by itself: nothing more will come.
-            asyncio.ensure_future(self.end("encoder_stopped"))
+            self._end_soon("encoder_stopped")
 
     async def _pump_analysis(self) -> None:
         assert self._analysis is not None
@@ -318,7 +333,7 @@ class LiveSession:
                     await self._analysis.write(pcm)
             except Exception:
                 log.exception("live: writing to the encoder failed")
-                asyncio.ensure_future(self.end("encoder_failed"))
+                self._end_soon("encoder_failed")
 
     def listen(self) -> AsyncIterator[bytes]:
         """The encoded stream from now on (with up to ``BACKLOG`` of what
@@ -333,14 +348,15 @@ class LiveSession:
     async def _listen(self, listener: _Listener) -> AsyncIterator[bytes]:
         try:
             while True:
-                await listener.ready.wait()
-                listener.ready.clear()
-                if listener.buf:
-                    data = bytes(listener.buf)
-                    listener.buf.clear()
-                    yield data
-                elif listener.closed:
-                    return
+                if not listener.buf:
+                    if listener.closed:
+                        return
+                    listener.ready.clear()
+                    await listener.ready.wait()
+                    continue
+                data = bytes(listener.buf)
+                listener.buf.clear()
+                yield data
         finally:
             self._listeners.discard(listener)
 
@@ -366,7 +382,9 @@ class LiveSession:
         for pipe in (self._encoder, self._analysis):
             if pipe is not None:
                 try:
-                    await pipe.close()
+                    await asyncio.wait_for(pipe.close(), _CLOSE_TIMEOUT)
+                except TimeoutError:
+                    log.warning("live: an encoder did not stop within %.1f s", _CLOSE_TIMEOUT)
                 except Exception:
                     log.exception("live: stopping the encoder failed")
         log.info("live: session %s on %s:%s ended (%s)", self.key[:6], *self.target, reason)
@@ -400,7 +418,15 @@ class LiveHub:
         self._current: dict[Target, LiveSession] = {}
         #: ``{target: {zone, track_no, position, playing}}``: where to come back to.
         self._resume: dict[Target, dict] = {}
+        #: A resume under way or waiting for the lock, per target.
+        self._resuming: dict[Target, asyncio.Task] = {}
+        #: ``{target: (point, clock)}``: the last resume done, reused as the
+        #: next session's point while the transport model may still lag.
+        self._just_resumed: dict[Target, tuple[dict, float]] = {}
         self._lock = asyncio.Lock()
+        #: The task holding ``_lock`` in ``start`` (an end inside it must not
+        #: wait for a resume that needs the lock).
+        self._lock_owner: asyncio.Task | None = None
 
     # -- reading ---------------------------------------------------------------
 
@@ -443,35 +469,69 @@ class LiveHub:
         target = (str(target[0]), str(target[1]))
         if target[0] not in ("party", "zone"):
             raise NoTarget(target)
+        # A resume on this target finishes before anything is read for the
+        # new session (it also needs the lock; waiting outside it avoids
+        # depending on who reached the lock first).
+        while (pending := self._resuming.get(target)) is not None:
+            await asyncio.shield(pending)
         async with self._lock:
-            zone = self._resolve(target)
-            if zone is None:
-                raise NoTarget(target)
-            old = self._current.get(target)
-            if old is not None:
-                # The queue position stays the one from before the first
-                # session: the coordinator now plays the old live stream.
-                await old.end("replaced")
-            else:
-                point = self._resume_point(zone)
-                if point is not None:
-                    self._resume[target] = point
-                else:
-                    self._resume.pop(target, None)
-            session = LiveSession(self, target=target, source_name=source_name, by=by,
-                                  input_format=input_format)
-            await session._open()
-            self._sessions[session.key] = session
-            self._current[target] = session
+            self._lock_owner = asyncio.current_task()
             try:
-                coord = self._controller.coordinator_of(zone)
-                base = self._base_url(coord.host)
-                uri = "x-rincon-mp3radio://" + base.split("://", 1)[-1] + \
-                    f"/api/home/live/{session.key}.mp3"
-                await self._commands.play_now(coord.uuid, uri, live_didl(source_name))
-            except Exception:
-                await session.end("failed")
-                raise
+                return await self._start_locked(target, source_name, by, input_format)
+            finally:
+                self._lock_owner = None
+
+    def _fresh_point(self, target: Target, zone: str) -> dict | None:
+        just = self._just_resumed.pop(target, None)
+        if just is not None:
+            point, at = just
+            age = self._clock() - at
+            if 0 <= age < _JUST_RESUMED:
+                point = dict(point)
+                if point["playing"]:
+                    point["position"] = _hms(_seconds(point["position"]) + age)
+                return point
+        return self._resume_point(zone)
+
+    async def _start_locked(self, target: Target, source_name: str, by: str,
+                            input_format: InputFormat) -> LiveSession:
+        zone = self._resolve(target)
+        if zone is None:
+            raise NoTarget(target)
+        old = self._current.get(target)
+        if old is not None:
+            # The queue position stays the one from before the first
+            # session: the coordinator now plays the old live stream.
+            await old.end("replaced")
+        else:
+            point = self._fresh_point(target, zone)
+            if point is not None:
+                self._resume[target] = point
+            else:
+                self._resume.pop(target, None)
+        session = LiveSession(self, target=target, source_name=source_name, by=by,
+                              input_format=input_format)
+        try:
+            await session._open()
+        except Exception:
+            await session.end("failed")
+            point = self._resume.pop(target, None)
+            if old is not None and point is not None:
+                # The old session is gone and nothing replaces it: the
+                # queue it interrupted comes back (after this start).
+                self._schedule_resume(target, point)
+            raise
+        self._sessions[session.key] = session
+        self._current[target] = session
+        try:
+            coord = self._controller.coordinator_of(zone)
+            base = self._base_url(coord.host)
+            uri = "x-rincon-mp3radio://" + base.split("://", 1)[-1] + \
+                f"/api/home/live/{session.key}.mp3"
+            await self._commands.play_now(coord.uuid, uri, live_didl(source_name))
+        except Exception:
+            await session.end("failed")
+            raise
         log.info("live: %s started %r on %s:%s", by, source_name, *target)
         return session
 
@@ -485,25 +545,53 @@ class LiveHub:
         point = self._resume.pop(session.target, None)
         if point is None or reason in _NO_RESUME:
             return
-        zone = self._resolve(session.target)
-        if zone is None:
-            return      # the party is gone
-        try:
-            zone = self._controller.coordinator_of(zone).uuid
-        except KeyError:
-            zone = point["zone"]
-        try:
-            await self._commands.seek_track(zone, point["track_no"])
-            await self._commands.seek_time(zone, point["position"])
-            if point["playing"]:
-                await self._commands.play(zone)
-        except Exception:
-            log.exception("live: resuming the queue on %s failed", zone)
+        task = self._schedule_resume(session.target, point)
+        if self._lock_owner is not asyncio.current_task():
+            await asyncio.shield(task)
+
+    def _schedule_resume(self, target: Target, point: dict) -> asyncio.Task:
+        task = asyncio.ensure_future(self._resume_now(target, point))
+        self._resuming[target] = task
+
+        def done(t: asyncio.Task) -> None:
+            if self._resuming.get(target) is t:
+                del self._resuming[target]
+        task.add_done_callback(done)
+        return task
+
+    async def _resume_now(self, target: Target, point: dict) -> None:
+        """Put the queue back where ``point`` says, under the hub's lock so
+        it never interleaves with a start's ``play_now``."""
+        async with self._lock:
+            if target in self._current:
+                # A newer session got in first: it owns the way back.
+                self._resume.setdefault(target, point)
+                return
+            zone = self._resolve(target)
+            if zone is None:
+                return      # the party is gone
+            try:
+                zone = self._controller.coordinator_of(zone).uuid
+            except KeyError:
+                zone = point["zone"]
+            try:
+                await self._commands.seek_track(zone, point["track_no"])
+                await self._commands.seek_time(zone, point["position"])
+                if point["playing"]:
+                    await self._commands.play(zone)
+            except Exception:
+                log.exception("live: resuming the queue on %s failed", zone)
+                return
+            self._just_resumed[target] = (point, self._clock())
 
     async def end_for_party(self, party_id: str) -> None:
         """The party is ending: stop its live sound, resume nothing."""
         target = ("party", str(party_id))
         self._resume.pop(target, None)
+        self._just_resumed.pop(target, None)
+        pending = self._resuming.pop(target, None)
+        if pending is not None:
+            pending.cancel()
         session = self._current.get(target)
         if session is not None:
             await session.end("party_ended")
