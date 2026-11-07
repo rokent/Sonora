@@ -55,6 +55,7 @@ This fork adds a few things for a shared household.
 - **Accounts.** Sign in with your own login (Authentik, or any OIDC provider). Sonora then knows who is who. See [docs/authentik.md](docs/authentik.md).
 - **Guests.** Show a QR code. Guests scan it and can join in for the evening without an account. The link is `/join?token=...`. Guest sessions last 12 hours, and signed-in sessions last 30 days. Making a new guest link ends every guest session that used the old one.
 - **Home Assistant.** Start parties and presets from automations, using a token. See [docs/home-assistant.md](docs/home-assistant.md).
+- **TV mode.** A full-screen page for a TV: the video, a music visualizer, or the cover with lyrics. Samsung TVs can be opened from the app. See [docs/tv-mode.md](docs/tv-mode.md).
 
 Logins are off by default. If you don't set `SONORA_OIDC_ISSUER`, Sonora behaves like upstream: no login, and everybody is "Local". Setup is in [docs/authentik.md](docs/authentik.md), and what it means for safety is in [SECURITY.md](SECURITY.md).
 

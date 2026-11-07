@@ -37,9 +37,11 @@ RUN useradd --system --uid 10001 --create-home --home-dir /home/sonora sonora \
 
 # yt-dlp needs a JavaScript runtime to solve YouTube's challenges: the same
 # Node the frontend builds with (Debian glibc, so it runs on python-slim once
-# libatomic1, the one library the slim image lacks, is there).
+# libatomic1, the one library the slim image lacks, is there). ffmpeg feeds
+# the TV-mode visualizer (backend/home/analysis.py); without it Sonora falls
+# back to the approximate visuals.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libatomic1 \
+ && apt-get install -y --no-install-recommends libatomic1 ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=noderuntime /usr/local/bin/node /usr/local/bin/node
 
