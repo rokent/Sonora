@@ -166,3 +166,23 @@ async def test_ended_party_is_404_for_guests(yt):
     await client(USER).request("POST", f"/api/parties/{pid}/end")
     r = await client(GUEST).request("POST", f"/api/parties/{pid}/youtube", {"video": VID})
     assert r.status == 404 and yt.yt.probed == []
+
+
+async def test_guest_cannot_play_next(yt):
+    pid = await _party()
+    r = await client(GUEST).request("POST", f"/api/parties/{pid}/youtube",
+                                    {"video": VID, "next": True})
+    assert r.status == 403 and r.json() == {"error": "forbidden"}
+    assert yt.ctl.queues["A"] == [] and yt.yt.probed == []
+
+
+async def test_user_play_next_is_attributed_with_a_fresh_key(yt):
+    pid = await _party()
+    u = client(USER)
+    for nxt in (False, True):
+        r = await u.request("POST", f"/api/parties/{pid}/youtube", {"video": VID, "next": nxt})
+        assert r.status == 200
+    uris = [i["uri"] for i in yt.ctl.queues["A"]]
+    assert len(set(uris)) == 2                      # same video, two keys
+    items = (await u.request("GET", f"/api/parties/{pid}/queue")).json()["items"]
+    assert [i["added_by"] for i in items] == [{"id": "sub-1", "name": "Tudor"}] * 2

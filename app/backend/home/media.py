@@ -26,7 +26,7 @@ from . import youtube
 from .store import home_dir, read_json, write_json
 from .youtube import Video
 
-__all__ = ["MediaKeys", "keys", "media_url", "didl_for", "router"]
+__all__ = ["MEDIA_URI", "MediaKeys", "keys", "media_url", "didl_for", "router"]
 
 router = APIRouter()
 
@@ -35,6 +35,8 @@ _TTL = 24 * 3600.0
 #: make many range requests per track, and 24 h purges do not need precision.
 _TOUCH_WRITE = 600.0
 _KEY = re.compile(r"[A-Za-z0-9_-]{16,64}")
+#: A queue item's URI as ``media_url`` builds it; group 1 is the key.
+MEDIA_URI = re.compile(r"https?://[^/]+/api/home/media/([A-Za-z0-9_-]{16,64})\.m4a")
 _PASSED = ("Content-Length", "Content-Range", "Accept-Ranges")
 #: The only Range form relayed (one range); anything else is ignored.
 _RANGE = re.compile(r"bytes=\d*-\d*")

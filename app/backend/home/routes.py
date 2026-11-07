@@ -369,7 +369,6 @@ async def party_queue(request: Request, party_id: str,
             "total": len(items), "has_more": start + len(out) < len(items), "party": party_id}
 
 
-_MEDIA_URI = re.compile(r"https?://[^/]+/api/home/media/([A-Za-z0-9_-]{16,64})\.m4a")
 SEARCH_MAX = 10
 SEARCH_TERM_MAX = 100
 
@@ -377,7 +376,7 @@ SEARCH_TERM_MAX = 100
 def _youtube_fields(uri: str) -> dict:
     """``source`` and ``video_id`` for a queue item that is one of our YouTube
     relay URLs (the badge and the video window use them)."""
-    m = _MEDIA_URI.fullmatch(uri)
+    m = media.MEDIA_URI.fullmatch(uri)
     video_id = media.keys().video_of(m.group(1)) if m else None
     return {"source": "youtube", "video_id": video_id} if video_id else {}
 
@@ -411,6 +410,8 @@ async def add_youtube_to_party_queue(request: Request, party_id: str, body: YouT
         lead = _lead(_party(party_id, who))
     except Refused as exc:
         return _answer(exc)
+    if body.next and who.is_guest:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
     video_id = youtube.parse_video_id(body.video)
     if video_id is None:
         return JSONResponse({"error": "bad_link"}, status_code=400)
@@ -426,10 +427,9 @@ async def add_youtube_to_party_queue(request: Request, party_id: str, body: YouT
     metadata = media.didl_for(video, uri)
     async with _queue_lock:
         await _main().state["commands"].add_to_queue(lead, uri, metadata, next_=body.next)
-        # Like Sonora's own route, only an add at the end is attributed: a
-        # Play Next insert would break the adder-to-last-copies matching.
-        if not body.next:
-            engine().record_add(party_id, uri, who)
+        # Attributed even for Play Next: every add issues a fresh media key,
+        # so the URI is unique and the last-copies matching stays right.
+        engine().record_add(party_id, uri, who)
     await changed()
     return {"ok": True, "item": _brief(video)}
 
