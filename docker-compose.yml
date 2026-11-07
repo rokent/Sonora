@@ -8,5 +8,14 @@ services:
       # The port the page is served on. With host networking there is no
       # port mapping, so change it here rather than with `ports:`.
       SONORA_WEB_PORT: 50205
+      # Optional: sign in with Authentik (or any OIDC provider). Leave
+      # SONORA_OIDC_ISSUER unset to keep Sonora login-free. See docs/authentik.md.
+      # SONORA_OIDC_ISSUER: https://authentik.example.com/application/o/sonora/
+      # SONORA_OIDC_CLIENT_ID: sonora
+      # SONORA_OIDC_CLIENT_SECRET: change-me
+      # Only let members of this group in (optional).
+      # SONORA_OIDC_GROUP: sonora-users
+      # Set to 1 when Sonora sits behind a reverse proxy you trust.
+      # SONORA_TRUST_PROXY: 1
     volumes:
       - ./sonora-data:/data
