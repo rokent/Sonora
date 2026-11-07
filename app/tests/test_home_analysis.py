@@ -532,10 +532,16 @@ async def test_ws_visual_principals(home, monkeypatch, fake_analyzer):
     for who in (GUEST_P, USER_P):
         sent = await client(who).websocket("/ws/visual?party=p1")
         assert sent[0]["type"] == "websocket.accept", who
-    # display sessions come from a parallel task; any kind but service may watch
-    monkeypatch.setattr(analysis, "_principal", lambda ws: DISPLAY_P)
+    # the socket asks permissions.ws_allowed: any kind but service may watch
+    from backend.home import permissions
+    monkeypatch.setattr(permissions, "_principal", lambda ws: DISPLAY_P)
     sent = await client().websocket("/ws/visual?party=p1")
     assert sent[0]["type"] == "websocket.accept"
+    calls = []
+    real = permissions.ws_allowed
+    monkeypatch.setattr(permissions, "ws_allowed", lambda ws: calls.append(ws.url.path) or real(ws))
+    sent = await client().websocket("/ws/visual?party=p1")
+    assert sent[0]["type"] == "websocket.accept" and calls == ["/ws/visual"]
     await fake_analyzer[0].close()
 
 

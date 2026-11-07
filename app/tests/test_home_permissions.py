@@ -108,6 +108,7 @@ EXPECTED_GUEST_READS = {
     ("GET", "/api/art"),
     ("GET", "/api/stream/audio/{key}"),
     ("GET", "/api/home/media/{key}.m4a"),          # public: speakers
+    ("GET", "/api/home/media/{key}.aac"),          # public: speakers (aac mode)
     ("GET", "/api/home/live/{key}.mp3"),           # public: speakers
     ("GET", "/api/home/files/{name}"),             # public: speakers
     ("GET", "/api/state"),
@@ -124,6 +125,7 @@ EXPECTED_GUEST_READS = {
     ("GET", "/api/parties"),
     ("GET", "/api/parties/{party_id}/queue"),
     ("GET", "/api/youtube/search"),
+    ("GET", "/api/airplay/receivers"),
     ("GET", "/api/themes"),
     ("GET", "/api/themes/schema"),
     ("GET", "/api/themes/reference"),
@@ -172,6 +174,7 @@ EXPECTED_DISPLAY_REACHABLE = {
     ("GET", "/api/art"),
     ("GET", "/api/stream/audio/{key}"),
     ("GET", "/api/home/media/{key}.m4a"),
+    ("GET", "/api/home/media/{key}.aac"),
     ("GET", "/api/home/live/{key}.mp3"),
     ("GET", "/api/home/files/{name}"),
     # DISPLAY
@@ -281,11 +284,18 @@ async def test_api_without_session_is_401_and_page_redirects(monkeypatch):
     assert r.status == 401 and r.json() == {"error": "login"}
     r = await c.request("POST", "/api/zones/x/group")
     assert r.status == 401 and r.json() == {"error": "login"}
-    r = await c.request("GET", "/party?id=p1")
+    r = await c.request("GET", "/license")
     assert r.status == 302
     loc = urlparse(r.headers["location"])
     assert loc.path == "/auth/login"
-    assert parse_qs(loc.query) == {"next": ["/party?id=p1"]}
+    assert parse_qs(loc.query) == {"next": ["/license"]}
+    # the party page goes to the join page, which tells a guest whose
+    # session ran out to ask for a new link (or sends a member to sign in)
+    r = await c.request("GET", "/party?id=p1")
+    assert r.status == 302
+    loc = urlparse(r.headers["location"])
+    assert loc.path == "/join"
+    assert parse_qs(loc.query) == {"expired": ["1"], "next": ["/party?id=p1"]}
     r = await c.request("GET", "/api/me")
     assert r.status == 200 and r.json() == {"auth": True, "principal": None}
     r = await c.request("GET", "/api/health")
@@ -376,3 +386,26 @@ async def test_join_and_party_serve_the_page_shell(monkeypatch):
     for path in ("/join?token=t", "/party", "/party/p1"):
         r = await client(GUEST_P).request("GET", path)
         assert (r.status, r.body) == (shell.status, shell.body), path
+
+
+def test_ws_visual_is_pinned_for_user_guest_display_not_service():
+    for who in (USER_P, GUEST_P, DISPLAY_P):
+        assert allowed(who, "GET", "/ws/visual"), who
+    assert not allowed(SERVICE_P, "GET", "/ws/visual")
+    assert not allowed(None, "GET", "/ws/visual")
+
+
+def test_is_user_means_a_person_only():
+    assert USER_P.is_user
+    for who in (SERVICE_P, GUEST_P, DISPLAY_P):
+        assert not who.is_user, who
+
+
+async def test_guest_whose_pass_was_rotated_reloading_party_goes_to_join(monkeypatch):
+    from backend.home.auth import GuestPass
+    enable(monkeypatch)
+    c = client(GUEST_P)
+    assert (await c.request("GET", "/party")).status not in (302, 401, 403)
+    GuestPass().rotate()
+    r = await c.request("GET", "/party")
+    assert r.status == 302 and urlparse(r.headers["location"]).path == "/join"

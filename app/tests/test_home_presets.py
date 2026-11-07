@@ -59,3 +59,24 @@ def test_persisted(tmp_path):
     path = tmp_path / "sub" / "p.json"
     p = Presets(path).add(_body(music=ITEM), household_of)
     assert Presets(path).list() == [p]
+
+
+def test_corrupt_file_is_set_aside_and_logged(tmp_path, caplog):
+    import logging
+    import os
+    path = tmp_path / "presets.json"
+    path.write_text("[[[")
+    with caplog.at_level(logging.WARNING):
+        store = Presets(path)
+    assert store.list() == []
+    aside = list(tmp_path.glob("presets.json.corrupt-*"))
+    assert len(aside) == 1 and aside[0].read_text() == "[[["
+    assert any("not valid JSON" in r.getMessage() for r in caplog.records)
+    store.add(_body(), household_of)
+    assert os.stat(path).st_mode & 0o777 == 0o600
+    assert Presets(path).list() == store.list()
+
+
+def test_missing_file_is_not_set_aside(tmp_path):
+    assert Presets(tmp_path / "presets.json").list() == []
+    assert list(tmp_path.iterdir()) == []

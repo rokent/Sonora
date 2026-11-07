@@ -11,6 +11,9 @@ dependencies = [
     "aiohttp>=3.14.5",
     "defusedxml>=0.7.1",
     "yt-dlp>=2026.10.26",
+    # yt-dlp solves YouTube's JavaScript challenges with these scripts and a
+    # JavaScript runtime (node in the image); pin to what yt-dlp requires.
+    "yt-dlp-ejs==0.8.0",
 ]
 
 [project.optional-dependencies]

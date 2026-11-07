@@ -26,7 +26,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import files, media, youtube
+from . import files, media, ratelimit, youtube
 from .auth import Principal, request_principal
 from .parties import MixedHousehold, NoSpeakers, PartyEngine, SpeakerTaken
 from .presets import Presets
@@ -42,6 +42,8 @@ _held: dict[str, Any] = {}
 #: Who opened each party's page: ``{party: {principal id: {id, name, kind, at}}}``.
 #: Presence only, kept in memory; it grants nothing.
 _members: dict[str, dict[str, dict]] = {}
+#: Background reads the engine started; held so they are not collected.
+_tasks: set[asyncio.Task] = set()
 #: Reading a queue position then changing it is one step for Sonora's callers.
 _queue_lock = asyncio.Lock()
 
@@ -104,7 +106,25 @@ def engine() -> PartyEngine:
             log.exception("files: startup cleanup failed")
         _held["engine"] = held = (controller, path, found)
         _members.clear()
+        _catch_up(found)
     return held[2]
+
+
+def _catch_up(found: PartyEngine) -> None:
+    """Read the speakers once as the engine starts listening, so a party
+    speaker that left while Sonora was not listening is let go now."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    async def read() -> None:
+        try:
+            await found.on_state({"type": "snapshot"})
+        except Exception:                              # noqa: BLE001 - logged, never raised
+            log.exception("parties: the first read of the speakers failed")
+    task = loop.create_task(read())
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
 
 
 def presets() -> Presets:
@@ -119,6 +139,7 @@ def reset() -> None:
     """Forget the engine and store in use (tests)."""
     _held.clear()
     _members.clear()
+    ratelimit.reset()
 
 
 async def _scene_metadata(zone: str, uri: str, title: str) -> str:
@@ -131,8 +152,27 @@ async def _notify(message: dict) -> None:
     await changed()
 
 
+#: Called (no arguments, not awaited) after every party change is announced:
+#: the AirPlay receivers follow the party list (``airplay.py``).
+_change_listeners: list = []
+
+
+def on_change(callback) -> None:
+    _change_listeners.append(callback)
+
+
+def off_change(callback) -> None:
+    if callback in _change_listeners:
+        _change_listeners.remove(callback)
+
+
 async def changed() -> None:
     await _main()._fan_out({"type": "parties"})
+    for callback in list(_change_listeners):
+        try:
+            callback()
+        except Exception:                                  # noqa: BLE001
+            log.exception("parties: a change listener failed")
 
 
 def _household_of(uuid: str) -> str | None:
@@ -255,9 +295,15 @@ class TakeBody(BaseModel):
     take: bool = False
 
 
+#: The longest track URI and DIDL a party queue add takes; beyond these
+#: the body is refused (422) before anything reaches a speaker.
+URI_MAX = 2048
+METADATA_MAX = 65536
+
+
 class QueueBody(BaseModel):
-    uri: str = Field(min_length=1)
-    metadata: str = ""
+    uri: str = Field(min_length=1, max_length=URI_MAX)
+    metadata: str = Field(default="", max_length=METADATA_MAX)
     title: str = ""
 
 
@@ -436,11 +482,22 @@ def _brief(video: youtube.Video) -> dict:
             "duration": video.duration, "thumbnail": video.thumbnail}
 
 
+def _slow_down() -> JSONResponse:
+    return JSONResponse({"error": "slow_down"}, status_code=429,
+                        headers={"Retry-After": "10"})
+
+
+def _who_key(who: Principal) -> str:
+    return f"{who.kind}:{who.id}"
+
+
 @router.get("/api/youtube/search")
-async def youtube_search(q: str = ""):
+async def youtube_search(request: Request, q: str = ""):
     term = q.strip()
     if not 1 <= len(term) <= SEARCH_TERM_MAX:
         return JSONResponse({"error": "bad_query"}, status_code=400)
+    if not ratelimit.youtube_search.allow(_who_key(request_principal(request))):
+        return _slow_down()
     try:
         found = await youtube.search(term, SEARCH_MAX)
     except youtube.YouTubeError:
@@ -465,6 +522,8 @@ async def add_youtube_to_party_queue(request: Request, party_id: str, body: YouT
     video_id = youtube.parse_video_id(body.video)
     if video_id is None:
         return JSONResponse({"error": "bad_link"}, status_code=400)
+    if not ratelimit.youtube_add.allow(_who_key(who)):
+        return _slow_down()
     try:
         video = await youtube.info(video_id)
         await youtube.audio_source(video_id)      # probe: nothing is queued if it fails

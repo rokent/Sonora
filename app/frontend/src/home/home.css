@@ -18,6 +18,7 @@
   color: var(--t-bg, #f6f6f7); background: var(--t-fg, #111);
 }
 .home-join__go:disabled { opacity: 0.5; cursor: default; }
+a.home-join__go { text-align: center; text-decoration: none; }
 
 .home-parties-button {
   position: fixed; left: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 2147483000;

@@ -3,11 +3,19 @@
 # request; a major version comes alone, since it can change behavior.
 version: 2
 updates:
+  # Checked daily for yt-dlp's sake: YouTube changes break it often and a
+  # fix ships as a new release. Dependabot allows one pip block per
+  # directory, so the schedule is the block's; the python group's pull
+  # request is updated in place rather than opened again.
   - package-ecosystem: pip
     directory: /app
     schedule:
-      interval: weekly
+      interval: daily
     groups:
+      # yt-dlp and its challenge solver (pinned to what yt-dlp asks for)
+      # move together, in a pull request of their own, any update type.
+      youtube:
+        patterns: ["yt-dlp", "yt-dlp-ejs"]
       python:
         update-types: [minor, patch]
 

@@ -57,6 +57,7 @@ PUBLIC: list[tuple[str, re.Pattern]] = [
 GUEST: list[tuple[str, re.Pattern]] = [
     _rule("GET", r"/api/state"),
     _rule("GET", r"/ws"),
+    _rule("GET", r"/ws/visual"),                 # the party's visualizer frames
     _rule("GET", r"/party(/.*)?"),                # the party page shell
     _rule("GET", r"/api/home/config"),
     _rule("GET", r"/api/parties"),
@@ -66,6 +67,7 @@ GUEST: list[tuple[str, re.Pattern]] = [
     _rule("POST", rf"/api/parties/{_SEG}/youtube"),
     _rule("POST", rf"/api/parties/{_SEG}/files"),
     _rule("GET", r"/api/youtube/search"),
+    _rule("GET", r"/api/airplay/receivers"),      # the AirPlay names help
     _rule("DELETE", rf"/api/parties/{_SEG}/queue/{_SEG}"),
     _rule("POST", rf"/api/parties/{_SEG}/transport/(play|pause|next|previous)"),
     _rule("POST", rf"/api/parties/{_SEG}/volume"),
@@ -140,6 +142,13 @@ async def guard(request: Request, call_next):
     if principal is None:
         if _is_page(method, path):
             target = path + (f"?{request.url.query}" if request.url.query else "")
+            if path == "/party" or path.startswith("/party/"):
+                # Most often a guest whose session ran out or whose pass was
+                # changed: the join page tells them to ask for a new link
+                # (when the device remembers a guest) or sends a household
+                # member on to sign in.
+                return RedirectResponse("/join?" + urlencode({"expired": "1", "next": target}),
+                                        status_code=302)
             return RedirectResponse("/auth/login?" + urlencode({"next": target}),
                                     status_code=302)
         # A TV whose display link was deleted: say so, so it shows that
