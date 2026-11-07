@@ -483,12 +483,13 @@ class PartyEngine:
         self._added.setdefault(party_id, {}).setdefault(uri, []).append({"id": by.id, "name": by.name})
         self._save()
 
-    def record_remove(self, party_id: str, uri: str) -> None:
-        """Forget the oldest adder of ``uri``: one copy of it left the queue."""
+    def record_remove(self, party_id: str, uri: str, nth: int = 0) -> None:
+        """Forget the adder of the ``nth`` copy of ``uri`` (the oldest by
+        default): that copy left the queue."""
         who = self._added.get(party_id, {}).get(uri)
-        if not who:
+        if not who or not 0 <= nth < len(who):
             return
-        who.pop(0)
+        who.pop(nth)
         if not who:
             del self._added[party_id][uri]
         self._save()

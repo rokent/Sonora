@@ -11,7 +11,7 @@ import inspect
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import Response
 
-from . import auth_routes, permissions
+from . import auth_routes, permissions, routes
 
 #: Pages of Sonora Home's own that the interface routes by path: they are the
 #: same page shell Sonora serves at ``/``.
@@ -51,9 +51,13 @@ def install(app: FastAPI) -> None:
     Call it right before ``origin.guard`` is registered. Starlette runs the
     last registered middleware first, so the origin guard (host and
     DNS-rebinding refusal) sees a request before this guard does; both must
-    pass, and the principal is on ``request.state`` before any route runs. Its routers are included before
+    pass, and the principal is on ``request.state`` before any route runs (and
+    before ``routes.attribution``, which credits queue additions to it). Its routers are included before
     any of ``main.py``'s routes, so ``/join`` wins over ``/{filename}``.
     """
+    # Registered before the guard so it runs after it, with the principal known.
+    app.middleware("http")(routes.attribution)
     app.middleware("http")(permissions.guard)
     app.include_router(auth_routes.router)
+    app.include_router(routes.router)
     app.include_router(pages)
