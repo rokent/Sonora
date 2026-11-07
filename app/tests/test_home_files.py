@@ -92,7 +92,7 @@ async def test_413_over_limit_deletes_partial(fr, monkeypatch):
     r = await client(USER).request(
         "POST", f"/api/parties/{pid}/files?name=a.flac", raw=[data, b"\x00" * 100])
     assert r.status == 413 and r.json() == {"error": "too_large"}
-    assert list((home_dir() / "uploads" / pid).iterdir()) == []
+    assert not (home_dir() / "uploads" / pid).exists()      # nothing left, folder too
     assert fr.added == []
     # declared length refused up front
     r = await client(USER).request("POST", f"/api/parties/{pid}/files?name=a.flac",
@@ -184,3 +184,60 @@ async def test_startup_cleanup_removes_orphans(fr):
     await client(USER).request("GET", "/api/parties")
     assert not orphan.exists()
     assert (home_dir() / "uploads" / pid).exists()      # the live party keeps its files
+
+
+async def test_party_total_cap(fr, monkeypatch):
+    monkeypatch.setattr(files, "PARTY_MAX_BYTES", 100)
+    pid = await _party()
+    d = SAMPLES["song.flac"]                      # 44 bytes
+    assert (await _post(USER, pid, "a.flac", d)).status == 200
+    assert (await _post(USER, pid, "b.flac", d)).status == 200
+    r = await _post(USER, pid, "c.flac", d)       # 132 > 100, caught while streaming
+    assert r.status == 413 and r.json() == {"error": "party_full"}
+    monkeypatch.setattr(files, "PARTY_MAX_BYTES", 80)
+    r = await _post(USER, pid, "d.flac", d)       # already over: refused before streaming
+    assert r.status == 413 and r.json() == {"error": "party_full"}
+    assert len(list((home_dir() / "uploads" / pid).iterdir())) == 2
+
+
+async def test_disk_floor(fr, monkeypatch):
+    pid = await _party()
+    monkeypatch.setattr(files, "_free", lambda folder: 10)
+    monkeypatch.setattr(files, "MIN_FREE_BYTES", 5)
+    r = await _post(USER, pid, "a.flac", SAMPLES["song.flac"])   # 10 - 44 < 5, during
+    assert r.status == 507 and r.json() == {"error": "disk_full"}
+    monkeypatch.setattr(files, "_free", lambda folder: 1)
+    r = await _post(USER, pid, "a.flac", SAMPLES["song.flac"])   # before
+    assert r.status == 507
+    assert not (home_dir() / "uploads" / pid).exists()
+    assert fr.added == []
+
+
+async def test_upload_racing_party_end(fr, monkeypatch):
+    pid = await _party()
+    real = files.store_stream
+
+    async def ends_midway(party_id, name, chunks):
+        stored = await real(party_id, name, chunks)
+        await client(USER).request("POST", f"/api/parties/{party_id}/end", {})
+        (home_dir() / "uploads" / party_id).mkdir(parents=True, exist_ok=True)
+        stored.path.write_bytes(b"late")          # the upload lands after the wipe
+        return stored
+    monkeypatch.setattr(files, "store_stream", ends_midway)
+    r = await _post(USER, pid, "a.flac", SAMPLES["song.flac"])
+    assert r.status == 404
+    assert not (home_dir() / "uploads" / pid).exists()
+    assert fr.added == []
+
+
+async def test_control_characters_stripped_from_didl(fr):
+    pid = await _party()
+    r = await _post(USER, pid, "a%01b%0Bc.flac", SAMPLES["song.flac"])
+    assert r.json()["item"]["title"] == "abc"
+    assert "\x01" not in fr.added[-1][1] and "\x0b" not in fr.added[-1][1]
+    tag = b"\x03" + b"Ti\x01t\x00le"
+    frame = b"TIT2" + len(tag).to_bytes(4, "big") + b"\x00\x00" + tag
+    size = len(frame)
+    head = b"ID3\x03\x00\x00" + bytes([0, 0, (size >> 7) & 127, size & 127])
+    r = await _post(USER, pid, "t.mp3", head + frame + b"\xff\xfb\x90\x00" * 4)
+    assert r.json()["item"]["title"] == "Tit"

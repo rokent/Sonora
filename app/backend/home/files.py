@@ -29,6 +29,11 @@ __all__ = ["MAX_BYTES", "FileError", "Stored", "router", "store_stream", "delete
 router = APIRouter()
 
 MAX_BYTES = 300 * 1024 * 1024
+#: All of one party's files together.
+PARTY_MAX_BYTES = 2 * 1024 ** 3
+#: Free disk space that must remain after an upload.
+MIN_FREE_BYTES = 1024 ** 3
+_XML_BAD = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _CHUNK = 64 * 1024
 _KEY = re.compile(r"[A-Za-z0-9_-]{16,64}")
 _PARTY = re.compile(r"[A-Za-z0-9_]{1,64}")
@@ -150,6 +155,13 @@ async def store_stream(party_id: str, name: str, chunks) -> Stored:
         raise FileError(415, "unsupported_type")
     folder = _uploads() / party_id
     folder.mkdir(parents=True, exist_ok=True)
+    used = _folder_bytes(folder)
+    if used >= PARTY_MAX_BYTES:
+        _rmdir_if_empty(folder)
+        raise FileError(413, "party_full")
+    if _free(folder) < MIN_FREE_BYTES:
+        _rmdir_if_empty(folder)
+        raise FileError(507, "disk_full")
     key = secrets.token_urlsafe(16)
     path = folder / f"{key}.{ext}"
     size, head, checked = 0, b"", False
@@ -161,6 +173,10 @@ async def store_stream(party_id: str, name: str, chunks) -> Stored:
                 size += len(chunk)
                 if size > MAX_BYTES:
                     raise FileError(413, "too_large")
+                if used + size > PARTY_MAX_BYTES:
+                    raise FileError(413, "party_full")
+                if _free(folder) - size < MIN_FREE_BYTES:
+                    raise FileError(507, "disk_full")
                 if not checked:
                     head += chunk
                     if len(head) >= 12:
@@ -174,10 +190,44 @@ async def store_stream(party_id: str, name: str, chunks) -> Stored:
             raise FileError(415, "unsupported_type")
     except BaseException:
         path.unlink(missing_ok=True)
+        _rmdir_if_empty(folder)
         raise
     title, artist = title_artist(path)
     stem = os.path.splitext(os.path.basename(name or ""))[0].strip() or "Track"
-    return Stored(key, ext, path, size, title or stem[:200], artist[:200])
+    title, artist = _clean(title or stem)[:200], _clean(artist)[:200]
+    return Stored(key, ext, path, size, title or "Track", artist)
+
+
+def _clean(text: str) -> str:
+    """``text`` without the control characters XML cannot carry."""
+    return _XML_BAD.sub("", text).strip()
+
+
+def _folder_bytes(folder: Path) -> int:
+    total = 0
+    for f in folder.iterdir():
+        try:
+            total += f.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def _free(folder: Path) -> int:
+    return shutil.disk_usage(folder).free
+
+
+def _rmdir_if_empty(folder: Path) -> None:
+    try:
+        folder.rmdir()
+    except OSError:
+        pass
+
+
+def discard(stored: "Stored") -> None:
+    """Delete a stored file, and its party's folder if that is now empty."""
+    stored.path.unlink(missing_ok=True)
+    _rmdir_if_empty(stored.path.parent)
 
 
 def _find(key: str, ext: str) -> Path | None:

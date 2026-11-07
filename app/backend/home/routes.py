@@ -508,6 +508,10 @@ async def add_file_to_party_queue(request: Request, party_id: str, name: str = "
         stored = await files.store_stream(party_id, name, request.stream())
     except files.FileError as exc:
         return JSONResponse({"error": exc.error}, status_code=exc.status)
+    # The party may have ended while the bytes were arriving.
+    if engine().get(party_id) is None:
+        files.discard(stored)
+        return JSONResponse({"error": "not_found"}, status_code=404)
     try:
         host = _main().state["controller"].coordinator_of(lead).host
         uri = media.base_url(host) + files.file_uri_path(stored)
@@ -516,7 +520,7 @@ async def add_file_to_party_queue(request: Request, party_id: str, name: str = "
             await _main().state["commands"].add_to_queue(lead, uri, metadata, next_=next)
             engine().record_add(party_id, uri, who)
     except BaseException:
-        stored.path.unlink(missing_ok=True)
+        files.discard(stored)
         raise
     await changed()
     return {"ok": True, "item": {"title": stored.title, "artist": stored.artist,
