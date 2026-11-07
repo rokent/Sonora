@@ -108,6 +108,7 @@ EXPECTED_GUEST_READS = {
     ("GET", "/api/art"),
     ("GET", "/api/stream/audio/{key}"),
     ("GET", "/api/home/media/{key}.m4a"),          # public: speakers
+    ("GET", "/api/home/media/{key}.aac"),          # public: speakers (aac mode)
     ("GET", "/api/home/live/{key}.mp3"),           # public: speakers
     ("GET", "/api/home/files/{name}"),             # public: speakers
     ("GET", "/api/state"),
@@ -172,6 +173,7 @@ EXPECTED_DISPLAY_REACHABLE = {
     ("GET", "/api/art"),
     ("GET", "/api/stream/audio/{key}"),
     ("GET", "/api/home/media/{key}.m4a"),
+    ("GET", "/api/home/media/{key}.aac"),
     ("GET", "/api/home/live/{key}.mp3"),
     ("GET", "/api/home/files/{name}"),
     # DISPLAY
