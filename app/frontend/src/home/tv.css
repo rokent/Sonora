@@ -1,0 +1,101 @@
+/* TV mode (home/TvApp.jsx): full screen, black, theme-independent. Sized
+   from the viewport so it reads across a room at 1920x1080 and still fits a
+   360 px phone. */
+.tv {
+  position: fixed; inset: 0; overflow: hidden; background: #000; color: #fff;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.tv--idle, .tv--idle * { cursor: none !important; }
+
+/* The only chrome: the fullscreen button (and a lyrics switch for signed-in
+   people), top right, gone with the cursor. Above the full-screen video. */
+.tv-chrome {
+  position: absolute; z-index: 60;
+  top: calc(12px + env(safe-area-inset-top, 0px)); right: calc(12px + env(safe-area-inset-right, 0px));
+  display: flex; gap: 8px; align-items: center;
+  transition: opacity 0.3s;
+}
+.tv--idle .tv-chrome { opacity: 0; pointer-events: none; }
+.tv-button {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 14px; font: inherit; font-size: 0.95rem; color: #fff; text-decoration: none; cursor: pointer;
+  background: rgba(0, 0, 0, 0.55); border: 1px solid rgba(255, 255, 255, 0.6); border-radius: 999px;
+}
+.tv-button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.tv-check input { margin: 0; width: 1.1em; height: 1.1em; }
+
+/* A message in the middle: no party, a removed link, sign in. */
+.tv-message {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; padding: 24px; box-sizing: border-box; text-align: center;
+}
+.tv-message__title { margin: 0; font-size: clamp(1.4rem, 4vw, 3.2rem); font-weight: 600; }
+.tv-message__text { margin: 0; max-width: 40em; font-size: clamp(1rem, 1.8vw, 1.5rem); opacity: 0.7; }
+
+/* The visualizer fills the screen. */
+.tv-visualizer { position: absolute; inset: 0; }
+.tv-visualizer .home-visualizer { min-height: 0; }
+
+/* The cover: art and the song, with the lyrics beside it when shown. */
+.tv-cover {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  gap: clamp(16px, 4vw, 72px); padding: clamp(16px, 5vh, 72px) clamp(16px, 5vw, 96px); box-sizing: border-box;
+}
+.tv-cover__main {
+  display: flex; align-items: center; gap: clamp(16px, 4vw, 64px); min-width: 0; max-width: 100%;
+}
+.tv-cover__art {
+  flex: none; width: min(60vh, 42vw); height: min(60vh, 42vw);
+  border-radius: 12px; overflow: hidden; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #2a2a2e, #111114); color: rgba(255, 255, 255, 0.35);
+}
+.tv-cover__art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tv-cover__art svg { width: 40%; height: 40%; }
+.tv-cover__text { min-width: 0; }
+.tv-cover__title, .tv-cover__artist, .tv-cover__rooms { margin: 0; overflow-wrap: anywhere; }
+.tv-cover__title { font-size: clamp(1.4rem, 4vw, 4rem); font-weight: 700; line-height: 1.15; }
+.tv-cover__artist { margin-top: 0.4em; font-size: clamp(1.1rem, 2.6vw, 2.6rem); opacity: 0.8; }
+.tv-cover__rooms { margin-top: 1.2em; font-size: clamp(0.9rem, 1.5vw, 1.4rem); opacity: 0.55; }
+
+/* With lyrics the cover becomes a column of art and song, lyrics beside. */
+.tv-cover--lyrics .tv-cover__main { flex-direction: column; align-items: flex-start; flex: 0 1 38%; }
+.tv-cover--lyrics .tv-cover__art { width: min(44vh, 30vw); height: min(44vh, 30vw); }
+.tv-cover--lyrics .tv-cover__title { font-size: clamp(1.2rem, 2.6vw, 2.8rem); }
+.tv-cover--lyrics .tv-cover__artist { font-size: clamp(1rem, 1.8vw, 1.8rem); }
+
+.tv-lyrics {
+  flex: 1 1 0; min-width: 0; max-height: 100%; overflow-y: auto; scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(transparent, #000 15%, #000 85%, transparent);
+  mask-image: linear-gradient(transparent, #000 15%, #000 85%, transparent);
+  padding: 30vh 0; box-sizing: border-box;
+}
+.tv-lyrics::-webkit-scrollbar { display: none; }
+.tv-lyrics:focus { outline: none; }
+.tv-lyrics--notice { mask-image: none; -webkit-mask-image: none; padding: 0; display: flex; flex-direction: column; gap: 16px; align-items: flex-start; }
+.tv-lyrics__line {
+  margin: 0 0 0.6em; font-size: clamp(1.1rem, 2.6vw, 2.8rem); font-weight: 600; line-height: 1.25;
+  opacity: 0.35; transition: opacity 0.3s;
+}
+.tv-lyrics__line--now { opacity: 1; }
+.tv-lyrics__plain { margin: 0; white-space: pre-line; font-size: clamp(1rem, 2vw, 2rem); line-height: 1.4; opacity: 0.85; }
+.tv-lyrics__status { margin: 0; font-size: clamp(1rem, 1.8vw, 1.6rem); opacity: 0.75; }
+.tv-lyrics__credit { margin: 1.5em 0 0; font-size: clamp(0.8rem, 1.1vw, 1rem); opacity: 0.45; }
+
+/* Narrow or tall screens (a phone): everything in one column. */
+@media (max-width: 700px), (max-aspect-ratio: 4/5) {
+  .tv-cover { flex-direction: column; justify-content: center; padding-top: 56px; }
+  .tv-cover__main { flex-direction: column; align-items: center; text-align: center; }
+  .tv-cover__art { width: min(78vw, 46vh); height: min(78vw, 46vh); }
+  .tv-cover__title { font-size: clamp(1.3rem, 6vw, 2.4rem); }
+  .tv-cover__artist { font-size: clamp(1rem, 4.5vw, 1.6rem); }
+  .tv-cover--lyrics { justify-content: flex-start; }
+  .tv-cover--lyrics .tv-cover__main { flex: none; flex-direction: row; align-items: center; text-align: left; width: 100%; }
+  .tv-cover--lyrics .tv-cover__art { width: 72px; height: 72px; border-radius: 8px; }
+  .tv-cover--lyrics .tv-cover__title { font-size: 1.15rem; }
+  .tv-cover--lyrics .tv-cover__artist { font-size: 1rem; }
+  .tv-cover--lyrics .tv-cover__rooms { margin-top: 0.4em; }
+  .tv-lyrics { width: 100%; flex: 1 1 0; min-height: 0; padding: 20vh 0; }
+  .tv-lyrics__line { font-size: 1.3rem; }
+}

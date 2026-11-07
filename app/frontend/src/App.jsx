@@ -19,8 +19,12 @@ const LOOKING_GRACE_MS = 1500
 
 export default function App() {
   const me = useMe()
+  const isDisplay = me.principal?.kind === 'display'
+  // A TV screen signed in with a display link has TV mode and nothing else.
+  useEffect(() => { if (isDisplay) window.location.replace(withBase('/tv')) }, [isDisplay])
   // Until we know who is looking, a guest must not glimpse the theme shell.
   if (me.loading) return <div style={{ minHeight: '100%', background: 'var(--t-bg, #f6f6f7)' }} />
+  if (isDisplay) return null
   // A guest has the party screens and nothing else.
   if (me.principal?.kind === 'guest') return <Suspense fallback={null}><PartyApp /></Suspense>
   return <Household partiesLink={!!(me.auth && me.principal?.kind === 'user')} />
