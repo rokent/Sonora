@@ -32,6 +32,10 @@ import Visualizer from './Visualizer.jsx'
 import './tv.css'
 
 const IDLE_MS = 3000
+// How long the last party stays on screen after it leaves the list, so a
+// refetch racing a restart (or a party ended and started again at once)
+// does not flash "No party playing".
+const GONE_GRACE_MS = 5000
 const PARTIES_POLL_MS = 30000
 const DISPLAY_POLL_MS = 60000
 
@@ -233,6 +237,11 @@ function Cover({ party, zones, lyricsOn, agreedByLink }) {
   )
 }
 
+// The canvas and the embed change only with the speaker's anchor; the store
+// pushes every room's changes, which must not re-render them.
+const TvVideo = React.memo(VideoWindow)
+const TvVisualizer = React.memo(Visualizer)
+
 /** The speaker's clock for the video (performance.now) and the visualizer (Date.now). */
 function useAnchor(transport) {
   const fallbackAt = useRef(performance.now())
@@ -244,7 +253,7 @@ function useAnchor(transport) {
   }, [transport?.rel_time, transport?.received_at, transport?.state, transport?.position_age]) // eslint-disable-line react-hooks/exhaustive-deps
 }
 
-function Stage({ party, mode, lyricsOn, agreedByLink }) {
+function Stage({ party, mode, lyricsOn, agreedByLink, onVideo }) {
   const { zones } = useSystem()
   const lead = zones[party.speakers?.[0]] || null
   const transport = lead?.transport || null
@@ -252,17 +261,19 @@ function Stage({ party, mode, lyricsOn, agreedByLink }) {
   const queueState = usePartyQueue(mode === 'video' ? party : null)
   const trackUri = transport?.track_uri || ''
 
-  if (mode === 'video') {
-    const video = currentVideo(transport, queueState.queue)
-    if (video) {
-      return <VideoWindow videoId={video.video_id} positionSeconds={anchor.positionSeconds}
-                          positionAt={anchor.positionAt} playing={anchor.playing} fullscreen />
-    }
+  const video = mode === 'video' ? currentVideo(transport, queueState.queue) : null
+  const videoId = video?.video_id || ''
+  useEffect(() => { onVideo(!!videoId) }, [videoId, onVideo])
+  useEffect(() => () => onVideo(false), [onVideo])
+
+  if (videoId) {
+    return <TvVideo videoId={videoId} positionSeconds={anchor.positionSeconds}
+                    positionAt={anchor.positionAt} playing={anchor.playing} fullscreen />
   }
   if (mode === 'visualizer') {
     return (
       <div className="tv-visualizer">
-        <Visualizer partyId={party.id} trackUri={trackUri} positionSeconds={anchor.positionSeconds}
+        <TvVisualizer partyId={party.id} trackUri={trackUri} positionSeconds={anchor.positionSeconds}
                     positionAt={anchor.epochAt} playing={anchor.playing} isRelayed={!!mediaKeyOf(trackUri)} />
       </div>
     )
@@ -298,8 +309,18 @@ export default function TvApp() {
 
   // Stay with the party on screen while it runs (a screen for any party).
   const shownId = useRef(null)
-  const party = pickParty(parties.parties, wanted, shownId.current)
-  shownId.current = party?.id || null
+  const picked = pickParty(parties.parties, wanted, shownId.current)
+  // The last party shown, held for a moment after it leaves the list.
+  const [held, setHeld] = useState(null)
+  useEffect(() => { if (picked) setHeld(picked) }, [picked])
+  useEffect(() => {
+    if (picked || !held) return undefined
+    const timer = setTimeout(() => setHeld(null), GONE_GRACE_MS)
+    return () => clearTimeout(timer)
+  }, [picked, held])
+  const party = picked || held
+  useEffect(() => { shownId.current = picked?.id || null }, [picked])
+  const [showingVideo, setShowingVideo] = useState(false)
 
   let body
   if (removed) {
@@ -316,12 +337,15 @@ export default function TvApp() {
   } else if (!party) {
     body = <Message title={t('home.tvPage.noParty')} text={t('home.tvPage.noPartyHelp')} />
   } else {
-    body = <Stage key={party.id} party={party} mode={mode} lyricsOn={lyricsOn} agreedByLink={!!link?.lyrics} />
+    body = <Stage key={party.id} party={party} mode={mode} lyricsOn={lyricsOn} agreedByLink={isDisplay && !!link?.lyrics}
+                  onVideo={setShowingVideo} />
   }
 
   // The lyrics switch is for signed-in people on the cover (the video falls
   // back to it when the track has none); a display's link decides for it.
-  const lyricsSwitch = isUser && !link?.lyrics && party && !removed && mode !== 'visualizer'
+  // A signed-in person on a lyrics link sees the LRCLIB notice like anyone
+  // else: only a display takes the link's maker's consent as its own.
+  const lyricsSwitch = isUser && !link?.lyrics && party && !removed && mode !== 'visualizer' && !showingVideo
 
   return (
     <div className={active ? 'tv' : 'tv tv--idle'} aria-label={t('home.tvPage.label')}>
