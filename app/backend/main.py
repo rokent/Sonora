@@ -44,6 +44,8 @@ from .sonos import scenes
 from .sonos import scene_alarms
 from .sonos import smb
 from . import ingress, origin
+from .home import permissions as home_permissions
+from .home.install import install as install_home
 from . import release
 from . import locale as locales
 from .errorlog import ErrorLog
@@ -149,6 +151,10 @@ app = FastAPI(title="Sonora", lifespan=lifespan)
 # Sonora has no login: anyone who can reach it on the network may drive it.
 # That is deliberate (SECURITY.md). It does not extend to a website
 # driving it through a visitor's browser, which this refuses.
+# Sonora Home: sign-in and per-principal permissions (backend/home/).
+# Installed first so it runs after the origin guard (the last registered
+# middleware runs first): a foreign host or origin is refused before sign-in.
+install_home(app)
 app.middleware("http")(origin.guard)
 
 
@@ -318,6 +324,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     if not origin.websocket_allowed(websocket):
         log.warning("refused a socket from origin %s",
                     websocket.headers.get("origin", "")[:60])
+        await websocket.close(code=1008)
+        return
+    if not home_permissions.ws_allowed(websocket):
         await websocket.close(code=1008)
         return
     await websocket.accept()
