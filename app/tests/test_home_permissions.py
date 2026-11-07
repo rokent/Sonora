@@ -44,28 +44,84 @@ def client(principal: Principal | None = None) -> Client:
 
 
 def _sample(path: str) -> str:
-    return re.sub(r"\{[^}]+\}", "x", path)
+    # "1" fits every path parameter, the integer service ids included.
+    return re.sub(r"\{[^}]+\}", "1", path)
 
 
-def _matches(rules, method, path) -> bool:
-    return any(m in ("*", method) and rx.fullmatch(path) for m, rx in rules)
+def _routes(routes):
+    """Every route of the app, the ones in included routers too (FastAPI keeps
+    an included router as one entry wrapping the original)."""
+    for route in routes:
+        inner = getattr(route, "original_router", None)
+        if inner is not None:
+            yield from _routes(inner.routes)
+        else:
+            yield route
+
+
+def _guest_reachable() -> set[tuple[str, str]]:
+    """(method, route path) for every HTTP route of the real app a guest may call."""
+    found = set()
+    for route in _routes(main.app.routes):
+        path = getattr(route, "path", "")
+        for method in getattr(route, "methods", None) or ():
+            if method != "HEAD" and allowed(GUEST_P, method, _sample(path)):
+                found.add((method, path))
+    return found
 
 
 # --- the rules ----------------------------------------------------------
 
+#: Every write a guest can make on the real app. Today only the public sign-in
+#: routes. Task 5 adds the party writes (join, queue, transport, volume) here,
+#: explicitly. Anything else showing up means a write was opened to guests.
+EXPECTED_GUEST_WRITES = {
+    ("POST", "/auth/guest"),
+    ("POST", "/auth/logout"),
+}
+
+#: Every read a guest can make on the real app, so a new upstream route that
+#: falls under a wildcard (/api/browse*, /api/themes*) is noticed.
+EXPECTED_GUEST_READS = {
+    ("GET", "/"),
+    ("GET", "/join"),
+    ("GET", "/party"),
+    ("GET", "/party/{rest:path}"),
+    ("GET", "/auth/login"),
+    ("GET", "/auth/callback"),
+    ("GET", "/api/me"),
+    ("GET", "/api/health"),
+    ("GET", "/api/art"),
+    ("GET", "/api/stream/audio/{key}"),
+    ("GET", "/api/state"),
+    ("GET", "/api/favorites"),
+    ("GET", "/api/services"),
+    ("GET", "/api/services/{sid}/browse"),
+    ("GET", "/api/services/{sid}/search"),
+    ("GET", "/api/services/{sid}/letters"),
+    ("GET", "/api/services/{sid}/item"),
+    ("GET", "/api/browse"),
+    ("GET", "/api/browse/letters"),
+    ("GET", "/api/queue/{uuid}"),
+    ("GET", "/api/themes"),
+    ("GET", "/api/themes/schema"),
+    ("GET", "/api/themes/reference"),
+}
+
+
 def test_every_upstream_write_is_denied_to_guests():
-    writes = []
-    for route in main.app.routes:
-        path = getattr(route, "path", "")
-        for method in getattr(route, "methods", None) or ():
-            if method in ("GET", "HEAD"):
-                continue
-            sample = _sample(path)
-            if _matches(GUEST, method, sample) or _matches(PUBLIC, method, sample):
-                continue
-            writes.append((method, sample))
-            assert allowed(GUEST_P, method, sample) is False, (method, path)
-    assert len(writes) > 50  # the walk really saw Sonora's routes
+    reachable = _guest_reachable()
+    writes = {(m, p) for m, p in reachable if m != "GET"}
+    assert writes == EXPECTED_GUEST_WRITES
+    # the walk really saw Sonora's routes, included routers too
+    all_writes = {(m, getattr(r, "path", "")) for r in _routes(main.app.routes)
+                  for m in getattr(r, "methods", None) or () if m not in ("GET", "HEAD")}
+    assert len(all_writes) > 50 and ("POST", "/auth/guest") in all_writes
+
+
+def test_guest_reads_on_the_real_app_are_pinned():
+    reads = {(m, p) for m, p in _guest_reachable() if m == "GET"}
+    assert reads == EXPECTED_GUEST_READS
 
 
 def test_guest_allowlist():
@@ -84,17 +140,19 @@ def test_guest_allowlist():
 
 
 def test_guest_reads():
-    for path in ("/api/state", "/ws", "/api/parties", "/api/parties/p1",
+    for path in ("/api/state", "/ws", "/api/parties", "/api/parties/p1/queue",
                  "/api/favorites", "/api/services", "/api/services/12/browse",
                  "/api/services/12/search", "/api/services/12/letters",
-                 "/api/services/12/item", "/api/library", "/api/browse",
+                 "/api/services/12/item", "/api/browse",
                  "/api/browse/letters", "/api/queue/RINCON_1", "/api/themes",
                  "/api/themes/schema", "/join", "/party", "/party/p1"):
         assert allowed(GUEST_P, "GET", path), path
         assert allowed(GUEST_P, "HEAD", path), path
     for path in ("/api/alarms", "/api/scenes", "/api/diagnostics", "/api/log",
                  "/api/guest-pass", "/api/presets", "/api/cloud/status",
-                 "/api/zones/x/settings", "/api/queue/x/y", "/license"):
+                 "/api/zones/x/settings", "/api/queue/x/y", "/license",
+                 "/api/library", "/api/parties/p1", "/api/parties/p1/members",
+                 "/api/services/abc/browse", "/api/services/12/user-playlists"):
         assert not allowed(GUEST_P, "GET", path), path
 
 
@@ -178,6 +236,19 @@ async def test_principal_is_on_the_request(monkeypatch):
     enable(monkeypatch)
     r = await client(USER_P).request("GET", "/api/me")
     assert r.json()["principal"] == {"kind": "user", "id": "sub-1", "name": "Tudor"}
+
+
+async def test_origin_guard_runs_before_sign_in(monkeypatch):
+    """A foreign Host is refused by the origin guard before the sign-in guard
+    could answer 401: host and DNS-rebinding refusal come first."""
+    enable(monkeypatch)
+    c = Client(main.app, host="evil.example")
+    r = await c.request("GET", "/api/state")
+    assert r.status == 403
+    assert r.json()["detail"].startswith("Sonora does not answer to the name evil.example")
+    dispatches = [m.kwargs.get("dispatch") for m in main.app.user_middleware]
+    # user_middleware[0] is outermost, so it runs first
+    assert dispatches.index(main.origin.guard) < dispatches.index(permissions.guard)
 
 
 async def test_origin_guard_still_runs(monkeypatch):

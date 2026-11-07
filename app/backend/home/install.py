@@ -48,10 +48,10 @@ async def party_subpage(request: Request, rest: str) -> Response:
 def install(app: FastAPI) -> None:
     """Register the permission guard and Sonora Home's routes.
 
-    Call it right after ``origin.guard`` is registered. Starlette runs the last
-    registered middleware first, so this guard sees a request before the
-    origin guard does; both must pass, and the principal is on
-    ``request.state`` before any route runs. Its routers are included before
+    Call it right before ``origin.guard`` is registered. Starlette runs the
+    last registered middleware first, so the origin guard (host and
+    DNS-rebinding refusal) sees a request before this guard does; both must
+    pass, and the principal is on ``request.state`` before any route runs. Its routers are included before
     any of ``main.py``'s routes, so ``/join`` wins over ``/{filename}``.
     """
     app.middleware("http")(permissions.guard)

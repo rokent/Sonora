@@ -151,9 +151,11 @@ app = FastAPI(title="Sonora", lifespan=lifespan)
 # Sonora has no login: anyone who can reach it on the network may drive it.
 # That is deliberate (SECURITY.md). It does not extend to a website
 # driving it through a visitor's browser, which this refuses.
-app.middleware("http")(origin.guard)
 # Sonora Home: sign-in and per-principal permissions (backend/home/).
+# Installed first so it runs after the origin guard (the last registered
+# middleware runs first): a foreign host or origin is refused before sign-in.
 install_home(app)
+app.middleware("http")(origin.guard)
 
 
 #: Routes that pass on what someone else's server sent. A picture can be an
