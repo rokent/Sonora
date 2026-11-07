@@ -3,7 +3,8 @@
 Sonora shows up as AirPlay speakers on your home network:
 
 - one per **running party**, named `Sonora: <party name>`, which plays on every speaker in that party;
-- one per **room**, named `Sonora: <room name>`, for S1 and S2 rooms alike.
+- one per **room**, named `Sonora: <room name>`, for S1 and S2 rooms alike
+  (not for offline rooms or rooms in a running party; see below).
 
 Pick one as your AirPlay output and play anything. When you stop, or the
 sender goes quiet for 8 seconds (phone locked, lid closed), the party or room
@@ -66,10 +67,30 @@ the receivers. It shares the host's network with any mDNS responder already
 there (another avahi, Home Assistant's). If you mount the host's D-Bus at
 `/run/dbus`, the host's avahi is used instead.
 
+## Turning it off
+
+Set `SONORA_AIRPLAY=0` (Docker / docker-compose environment, or the Unraid
+template's "AirPlay receivers" setting). In the Home Assistant app, turn
+**AirPlay receivers** off on the Configuration tab. Then neither the
+receivers nor the container's dbus/avahi daemons are started.
+
+## Which rooms get a name
+
+Rooms that are offline get none, and a room in a running party gets none
+while the party runs: send to the party's name instead. The room's name comes
+back within about 5 seconds of the party ending.
+
 ## When the names do not appear
 
-- Check the log for `airplay:` lines. `shairport-sync is not installed` means
-  AirPlay is off (normal outside the Docker image).
+- Check the log for `airplay:` lines:
+  - `shairport-sync is not installed`: AirPlay is off (normal outside the
+    Docker image).
+  - `AirPlay off: no mDNS (avahi) available`: the container's avahi did not
+    start (see the `AirPlay:` lines at the top of the log), or a mounted host
+    D-Bus has no avahi on it.
+  - `not restarting it`: that receiver exited 5 times in a row right after
+    starting. Restart Sonora after fixing the cause (usually a port in
+    5100-5199 taken by something else).
 - The sender must be on the same network segment (VLAN) as Sonora, or mDNS
   must be forwarded between segments (UniFi "Multicast DNS", an mDNS
   reflector).

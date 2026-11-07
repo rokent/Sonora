@@ -37,6 +37,9 @@ backup_exclude:
 options:
   web_port: 50205
   event_port: 50206
+  airplay: true
 schema:
   web_port: port
   event_port: port
+  # false turns the AirPlay receivers off (docker-entrypoint.sh reads it).
+  airplay: bool

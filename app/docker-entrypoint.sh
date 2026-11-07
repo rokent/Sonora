@@ -14,24 +14,50 @@ set -e
 # mounted from the host (with the host's avahi on it) is used as it is;
 # otherwise the container runs its own bus and avahi, which share the host's
 # network with any mDNS responder already there. Both need root, so here.
-start_avahi() {
-    command -v shairport-sync >/dev/null 2>&1 || return 0
-    command -v avahi-daemon >/dev/null 2>&1 || return 0
+# SONORA_AIRPLAY=0 (or the Home Assistant app's "airplay: false") turns it
+# all off. Nothing in here may stop Sonora from starting (a read-only root
+# file system, a daemon that will not start): it runs in a subshell that
+# ignores errors, and its caller ignores its status.
+airplay_off() {
+    if [ -f /data/options.json ] && command -v python >/dev/null 2>&1; then
+        python - <<'PY' 2>/dev/null && SONORA_AIRPLAY=0 && export SONORA_AIRPLAY
+import json, sys
+sys.exit(0 if json.load(open("/data/options.json")).get("airplay") is False else 1)
+PY
+    fi
+    case "$(printf %s "${SONORA_AIRPLAY:-}" | tr '[:upper:]' '[:lower:]')" in
+        0|false|no|off) return 0 ;;
+    esac
+    return 1
+}
+
+start_avahi() (
+    set +e
+    command -v shairport-sync >/dev/null 2>&1 || exit 0
+    command -v avahi-daemon >/dev/null 2>&1 || exit 0
     # .sonora marks a bus started here: after a container restart its socket
     # is stale, while a socket without the mark is the host's.
     if [ -S /run/dbus/system_bus_socket ] && [ ! -e /run/dbus/.sonora ]; then
-        return 0                                       # the host's bus and avahi
+        exit 0                                         # the host's bus and avahi
     fi
-    mkdir -p /run/dbus
-    rm -f /run/dbus/system_bus_socket /run/dbus/pid /run/avahi-daemon/pid
-    touch /run/dbus/.sonora
-    dbus-daemon --system --fork || { echo "AirPlay: dbus did not start" >&2; return 0; }
+    mkdir -p /run/dbus 2>/dev/null
+    rm -f /run/dbus/system_bus_socket /run/dbus/pid /run/avahi-daemon/pid 2>/dev/null
+    touch /run/dbus/.sonora 2>/dev/null
+    if ! dbus-daemon --system --fork; then
+        echo "AirPlay: dbus did not start; AirPlay receivers will be off" >&2
+        exit 0
+    fi
     avahi-daemon --daemonize --no-chroot --no-rlimits \
-        || echo "AirPlay: avahi did not start; AirPlay names will not be announced" >&2
-}
+        || echo "AirPlay: avahi did not start; AirPlay receivers will be off" >&2
+    exit 0
+)
 
 if [ "$(id -u)" = 0 ]; then
-    start_avahi
+    if airplay_off; then
+        echo "AirPlay: off (SONORA_AIRPLAY=0)" >&2
+    else
+        start_avahi || true
+    fi
     owner=$(stat -c %u /data)
     group=$(stat -c %g /data)
     if [ "$owner" = 0 ]; then

@@ -21,6 +21,9 @@ services:
       # household members, watch-only for guests.
       # SONORA_NEKO_URL: http://sonora.local:8080/?usr=host&pwd=change-me-admin
       # SONORA_NEKO_VIEW_URL: http://sonora.local:8080/?usr=guest&pwd=change-me-user
+      # AirPlay receivers (each running party and room as an AirPlay speaker,
+      # ports 5100-5199 TCP/UDP + mDNS; see docs/airplay.md). 0 turns them off.
+      # SONORA_AIRPLAY: 0
     volumes:
       - ./sonora-data:/data
 

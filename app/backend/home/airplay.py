@@ -25,8 +25,11 @@ Findings behind the choices (docs/airplay.md, task report):
 
 The supervisor reconciles every 5 seconds and whenever the party list
 changes, restarts a process that exits with backoff (1 s doubling to 30 s,
-back to 1 s after a run of a minute), and is off, with a log line, where
-shairport-sync is not installed.
+back to 1 s after a run of a minute; given up on after 5 exits in a row each
+within 10 s of starting; moved to another port when its own is taken). Rooms
+that are offline or in a running party get no receiver. It is off, with one
+log line, when ``SONORA_AIRPLAY=0``, when shairport-sync is not installed, or
+when no avahi daemon answers on the system D-Bus.
 """
 
 from __future__ import annotations
@@ -35,7 +38,9 @@ import asyncio
 import collections
 import contextlib
 import logging
+import os
 import shutil
+import socket
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -63,7 +68,12 @@ HEALTHY_RUN = 60.0
 #: After a refused start (party gone, controller not up), sound is dropped
 #: this long before trying again.
 RETRY_START = 5.0
+#: A receiver that exits this many times in a row, each within FAST_EXIT
+#: seconds of starting, is given up on (logged once) until it is removed.
+MAX_FAST_EXITS, FAST_EXIT = 5, 10.0
 READ_SIZE = 16384
+#: ``SONORA_AIRPLAY`` values that turn the receivers off.
+OFF = {"0", "false", "no", "off"}
 
 CONFIG = """\
 // Written by Sonora (backend/home/airplay.py). The name, RTSP port and
@@ -104,15 +114,24 @@ def _cut(text: str, limit: int) -> str:
     return raw[:limit].decode("utf-8", "ignore").rstrip()
 
 
+def held_rooms(parties: list[dict]) -> set[str]:
+    """The rooms (zone uuids) in a running party."""
+    return {str(z) for p in parties if p.get("speakers") for z in p["speakers"]}
+
+
 def receiver_names(parties: list[dict], zones: dict[str, str]) -> dict[Target, str]:
     """What should be advertised: running parties (oldest first), then rooms
-    (by name), each ``Sonora: <name>``, cut to fit and made unique."""
+    (by name) that are not in a running party (the party's receiver covers
+    them), each ``Sonora: <name>``, cut to fit and made unique. ``zones`` is
+    the reachable rooms only."""
     wanted: list[tuple[Target, str]] = []
     for party in parties:
         if party.get("speakers"):
             wanted.append((("party", str(party["id"])), str(party.get("name") or "Party")))
+    held = held_rooms(parties)
     for uuid, name in sorted(zones.items(), key=lambda kv: (str(kv[1]).casefold(), kv[0])):
-        wanted.append((("zone", str(uuid)), str(name or uuid)))
+        if str(uuid) not in held:
+            wanted.append((("zone", str(uuid)), str(name or uuid)))
     names: dict[Target, str] = {}
     taken: set[str] = set()
     for target, label in wanted:
@@ -139,6 +158,10 @@ class Receiver:
         self.stopping = False
         self.restarts = 0
         self.delay = BACKOFF_FIRST
+        self.fast_exits = 0
+        #: Given up on after MAX_FAST_EXITS fast exits; kept (not restarted)
+        #: until reconcile removes it.
+        self.failed = False
         #: Bytes read from the current process, for frame alignment.
         self.offset = 0
         self.hold_until = 0.0
@@ -155,8 +178,10 @@ class AirPlaySupervisor:
                  parties: Callable[[], list[dict]], zones: Callable[[], dict[str, str]],
                  hub: Callable[[], Any], clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-                 interval: float = INTERVAL) -> None:
+                 interval: float = INTERVAL,
+                 port_free: Callable[[int], bool] | None = None) -> None:
         self.executable, self.config_path = executable, config_path
+        self._port_free = port_free or port_is_free
         self._spawn, self._parties, self._zones, self._hub = spawn, parties, zones, hub
         self._clock, self._sleep, self._interval = clock, sleep, interval
         self.receivers: dict[Target, Receiver] = {}
@@ -167,7 +192,7 @@ class AirPlaySupervisor:
 
     # -- what is wanted --------------------------------------------------------
 
-    def _wanted(self) -> dict[Target, str]:
+    def _wanted(self) -> tuple[dict[Target, str], set[str]]:
         try:
             parties = list(self._parties())
         except Exception:                                  # noqa: BLE001
@@ -178,10 +203,17 @@ class AirPlaySupervisor:
         except Exception:                                  # noqa: BLE001
             log.exception("airplay: reading the rooms failed")
             zones = {}
-        return receiver_names(parties, zones)
+        return receiver_names(parties, zones), held_rooms(parties)
 
     def list(self) -> list[dict]:
-        return [r.as_dict() for r in self.receivers.values()]
+        """The receivers that are up (not given up on)."""
+        return [r.as_dict() for r in self.receivers.values() if not r.failed]
+
+    def _free_port(self, rcv: Receiver | None = None) -> int | None:
+        """The lowest port in the range no other receiver holds and nothing
+        else on this machine is listening on."""
+        used = {r.port for r in self.receivers.values() if r is not rcv}
+        return next((p for p in PORTS if p not in used and self._port_free(p)), None)
 
     def poke(self) -> None:
         """Reconcile soon (the party list changed)."""
@@ -191,21 +223,22 @@ class AirPlaySupervisor:
         async with self._reconciling:
             if self._closed:
                 return
-            wanted = self._wanted()
+            wanted, held = self._wanted()
             for target, rcv in list(self.receivers.items()):
                 if wanted.get(target) != rcv.name:
                     del self.receivers[target]
-                    await self._stop(rcv, "receiver_removed")
-            used = {r.port for r in self.receivers.values()}
+                    # A room taken into a party is the party's now: its live
+                    # sound ends without seeking the room's old queue.
+                    taken = target[0] == "zone" and target[1] in held
+                    await self._stop(rcv, "shutdown" if taken else "receiver_removed")
             for target, name in wanted.items():
                 if target in self.receivers:
                     continue
-                port = next((p for p in PORTS if p not in used), None)
+                port = self._free_port()
                 if port is None:
                     log.warning("airplay: no free port in %d-%d for %r", PORTS.start,
                                 PORTS.stop - 1, name)
                     continue
-                used.add(port)
                 rcv = self.receivers[target] = Receiver(target, name, port)
                 rcv.task = asyncio.create_task(self._run(rcv), name=f"airplay {name}")
                 log.info("airplay: receiver %r on port %d", name, port)
@@ -233,8 +266,8 @@ class AirPlaySupervisor:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._loop_task
         async with self._reconciling:
-            for rcv in list(self.receivers.values()):
-                await self._stop(rcv, "shutdown")
+            await asyncio.gather(*(self._stop(rcv, "shutdown")
+                                   for rcv in list(self.receivers.values())))
             self.receivers.clear()
 
     # -- one process -----------------------------------------------------------
@@ -255,17 +288,35 @@ class AirPlaySupervisor:
                 rcv.offset = 0
                 try:
                     await self._pump(rcv)
+                except Exception:                          # noqa: BLE001
+                    log.exception("airplay: reading from %r failed", rcv.name)
                 finally:
                     await self._end_session(rcv, "disconnected")
-                    await rcv.process.stop()
+                    try:
+                        await rcv.process.stop()
+                    except Exception:                      # noqa: BLE001
+                        log.exception("airplay: stopping %r failed", rcv.name)
             if rcv.stopping:
                 return
-            if self._clock() - began >= HEALTHY_RUN:
+            ran = self._clock() - began
+            if ran >= HEALTHY_RUN:
                 rcv.delay = BACKOFF_FIRST
+            rcv.fast_exits = rcv.fast_exits + 1 if ran < FAST_EXIT else 0
+            if rcv.fast_exits >= MAX_FAST_EXITS:
+                rcv.failed = True
+                log.error("airplay: %r exited %d times in a row within %.0f s of starting; "
+                          "not restarting it", rcv.name, rcv.fast_exits, FAST_EXIT)
+                return
             rcv.restarts += 1
             log.warning("airplay: %r stopped; restarting in %.0f s", rcv.name, rcv.delay)
             await self._sleep(rcv.delay)
             rcv.delay = min(rcv.delay * 2, BACKOFF_MAX)
+            if not rcv.stopping and not self._port_free(rcv.port):
+                port = self._free_port(rcv)
+                if port is not None:
+                    log.warning("airplay: port %d is taken; %r moves to %d",
+                                rcv.port, rcv.name, port)
+                    rcv.port = port
 
     async def _pump(self, rcv: Receiver) -> None:
         while not rcv.stopping:
@@ -362,6 +413,49 @@ class _Shairport:
         self._stderr.cancel()
 
 
+def port_is_free(port: int) -> bool:
+    """Whether nothing listens on TCP ``port`` (shairport-sync's RTSP)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("", port))
+        except OSError:
+            return False
+    return True
+
+
+BUS_SOCKETS = (Path("/run/dbus/system_bus_socket"), Path("/var/run/dbus/system_bus_socket"))
+
+
+async def avahi_available(*, tries: int = 3, pause: float = 1.0) -> bool:
+    """Whether an avahi daemon answers on the system D-Bus. shairport-sync
+    cannot announce (and exits at once) without one."""
+    if not os.environ.get("DBUS_SYSTEM_BUS_ADDRESS") and not any(p.exists() for p in BUS_SOCKETS):
+        return False
+    send = shutil.which("dbus-send")
+    if send is None:
+        return True                    # a bus is there; nothing to ask avahi with
+    for attempt in range(tries):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                send, "--system", "--print-reply", "--reply-timeout=2000",
+                "--dest=org.freedesktop.Avahi", "/",
+                "org.freedesktop.Avahi.Server.GetVersionString",
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+            if await asyncio.wait_for(proc.wait(), 5.0) == 0:
+                return True
+        except (OSError, TimeoutError):
+            pass
+        if attempt + 1 < tries:
+            await asyncio.sleep(pause)
+    return False
+
+
+def enabled() -> bool:
+    return os.environ.get("SONORA_AIRPLAY", "").strip().lower() not in OFF
+
+
 async def spawn_shairport(args: list[str]) -> Process:
     proc = await asyncio.create_subprocess_exec(
         *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
@@ -392,7 +486,9 @@ def _zones() -> dict[str, str]:
     from . import routes
     controller = routes._main().state.get("controller")
     zones = getattr(controller, "zones", None) or {}
-    return {uuid: str(getattr(z, "name", "") or uuid) for uuid, z in list(zones.items())}
+    # Unreachable rooms get no receiver: a sender would pick a dead name.
+    return {uuid: str(getattr(z, "name", "") or uuid) for uuid, z in list(zones.items())
+            if getattr(z, "online", True)}
 
 
 def _hub():
@@ -401,11 +497,19 @@ def _hub():
 
 
 async def start_supervisor(*, which: Callable[[str], str | None] = shutil.which,
-                           spawn: Spawn = spawn_shairport) -> AirPlaySupervisor | None:
-    """Start the receivers, or say why not and leave AirPlay off."""
+                           spawn: Spawn = spawn_shairport,
+                           probe: Callable[[], Awaitable[bool]] = avahi_available,
+                           ) -> AirPlaySupervisor | None:
+    """Start the receivers, or say why not (once) and leave AirPlay off."""
+    if not enabled():
+        log.info("airplay: AirPlay off (SONORA_AIRPLAY=%s)", os.environ.get("SONORA_AIRPLAY"))
+        return None
     executable = which("shairport-sync")
     if executable is None:
         log.info("airplay: shairport-sync is not installed; AirPlay receivers are off")
+        return None
+    if not await probe():
+        log.warning("airplay: AirPlay off: no mDNS (avahi) available")
         return None
     config = Path(tempfile.gettempdir()) / "sonora-airplay.conf"
     try:

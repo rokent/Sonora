@@ -50,18 +50,38 @@ class FakeProcess:
         if not self.stopped:
             self.stopped = True
             self.out.put_nowait(b"")
+            if self.gate is not None:
+                self.entered.set()
+                await self.gate.wait()
+
+
+class BrokenProcess(FakeProcess):
+    """Its first read raises, as a broken pipe might."""
+
+    async def read(self) -> bytes:
+        if not getattr(self, "raised", False):
+            self.raised = True
+            raise RuntimeError("pipe broke")
+        return await super().read()
 
 
 class Spawner:
     def __init__(self):
         self.procs: list[FakeProcess] = []
         self.fail = 0
+        self.broken = 0
+        self.gate: asyncio.Event | None = None
 
     async def __call__(self, args):
         if self.fail:
             self.fail -= 1
             raise OSError("cannot start")
-        proc = FakeProcess(args)
+        if self.broken:
+            self.broken -= 1
+            proc = BrokenProcess(args)
+        else:
+            proc = FakeProcess(args)
+        proc.gate, proc.entered = self.gate, asyncio.Event()
         self.procs.append(proc)
         return proc
 
@@ -130,13 +150,15 @@ async def settle(n=20):
 def make(parties=None, zones=None, interval=airplay.INTERVAL):
     state = SimpleNamespace(
         parties=parties if parties is not None else [
-            {"id": "p1", "name": "Garden Party", "speakers": ["RINCON_A"]}],
-        zones=zones if zones is not None else {"RINCON_A": "Kitchen", "RINCON_B": "Den"})
+            {"id": "p1", "name": "Garden Party", "speakers": ["RINCON_P"]}],
+        zones=zones if zones is not None else {"RINCON_A": "Kitchen", "RINCON_B": "Den"},
+        busy=set())
     spawner, hub, clock, sleeper = Spawner(), FakeHub(), Clock(), Sleeper()
     sup = airplay.AirPlaySupervisor(
         executable="/usr/bin/shairport-sync", config_path=Path("/tmp/x.conf"), spawn=spawner,
         parties=lambda: state.parties, zones=lambda: state.zones, hub=lambda: hub,
-        clock=clock, sleep=sleeper, interval=interval)
+        clock=clock, sleep=sleeper, interval=interval,
+        port_free=lambda port: port not in state.busy)
     return SimpleNamespace(sup=sup, state=state, spawner=spawner, hub=hub, clock=clock,
                            sleeper=sleeper)
 
@@ -144,17 +166,32 @@ def make(parties=None, zones=None, interval=airplay.INTERVAL):
 # -- names ---------------------------------------------------------------------------
 
 
-def test_names_cover_running_parties_and_every_room():
+def test_names_cover_running_parties_and_free_rooms():
     names = airplay.receiver_names(
-        [{"id": "p1", "name": "Garden Party", "speakers": ["A"]},
+        [{"id": "p1", "name": "Garden Party", "speakers": ["P"]},
          {"id": "p2", "name": "Ended", "speakers": []}],
         {"B": "Den", "A": "Kitchen"})
     assert names == {("party", "p1"): "Sonora: Garden Party",
                      ("zone", "B"): "Sonora: Den", ("zone", "A"): "Sonora: Kitchen"}
 
 
+def test_rooms_in_a_running_party_get_no_receiver_of_their_own():
+    names = airplay.receiver_names(
+        [{"id": "p1", "name": "Garden Party", "speakers": ["A", "B"]}],
+        {"A": "Kitchen", "B": "Den", "C": "Study"})
+    assert names == {("party", "p1"): "Sonora: Garden Party", ("zone", "C"): "Sonora: Study"}
+
+
+def test_offline_rooms_get_no_receiver(monkeypatch):
+    controller = SimpleNamespace(zones={
+        "A": SimpleNamespace(name="Kitchen", online=True),
+        "B": SimpleNamespace(name="Den", online=False)})
+    monkeypatch.setattr(routes, "_main", lambda: SimpleNamespace(state={"controller": controller}))
+    assert airplay._zones() == {"A": "Kitchen"}
+
+
 def test_same_names_are_made_unique():
-    names = airplay.receiver_names([{"id": "p1", "name": "Kitchen", "speakers": ["A"]}],
+    names = airplay.receiver_names([{"id": "p1", "name": "Kitchen", "speakers": ["C"]}],
                                    {"A": "Kitchen", "B": "kitchen"})
     assert names[("party", "p1")] == "Sonora: Kitchen"
     assert sorted(names.values()) == ["Sonora: Kitchen", "Sonora: Kitchen 2",
@@ -194,7 +231,7 @@ async def test_reconcile_adds_and_removes_receivers_as_parties_change():
     await t.sup.reconcile()
     await settle()
     garden = t.spawner.live("Sonora: Garden Party")
-    t.state.parties = [{"id": "p2", "name": "Late Night", "speakers": ["RINCON_B"]}]
+    t.state.parties = [{"id": "p2", "name": "Late Night", "speakers": ["RINCON_Q"]}]
     await t.sup.reconcile()
     await settle()
     assert garden.stopped
@@ -267,6 +304,7 @@ async def test_a_crashed_process_is_restarted_with_backoff():
     await t.sup.reconcile()
     await settle()
     for _ in range(7):
+        t.clock.now += airplay.FAST_EXIT           # each run long enough not to count as fast
         t.spawner.live("Sonora: Kitchen").crash()
         await settle()
     assert t.sleeper.waits == [1, 2, 4, 8, 16, 30, 30]
@@ -280,6 +318,7 @@ async def test_backoff_starts_over_after_a_healthy_run():
     await t.sup.reconcile()
     await settle()
     for _ in range(3):
+        t.clock.now += airplay.FAST_EXIT
         t.spawner.live("Sonora: Kitchen").crash()
         await settle()
     t.clock.now += airplay.HEALTHY_RUN
@@ -297,6 +336,89 @@ async def test_a_process_that_will_not_start_is_retried_with_backoff():
     assert t.sleeper.waits == [1, 2]
     t.spawner.live("Sonora: Kitchen")
     await t.sup.close()
+
+
+async def test_five_fast_exits_in_a_row_give_the_receiver_up(caplog):
+    caplog.set_level(logging.ERROR, logger="backend.home.airplay")
+    t = make(parties=[], zones={"RINCON_A": "Kitchen", "RINCON_B": "Den"})
+    await t.sup.reconcile()
+    await settle()
+    for _ in range(airplay.MAX_FAST_EXITS):
+        t.spawner.live("Sonora: Kitchen").crash()
+        await settle()
+    kitchen = [p for p in t.spawner.procs if p.name() == "Sonora: Kitchen"]
+    assert len(kitchen) == airplay.MAX_FAST_EXITS and all(p.stopped for p in kitchen)
+    assert t.sup.receivers[("zone", "RINCON_A")].failed
+    assert [r["name"] for r in t.sup.list()] == ["Sonora: Den"]
+    await t.sup.reconcile()                        # not restarted by reconcile either
+    await settle()
+    assert len([p for p in t.spawner.procs if p.name() == "Sonora: Kitchen"]) == 5
+    assert caplog.text.count("not restarting it") == 1
+    await t.sup.close()
+
+
+async def test_a_slow_exit_resets_the_fast_exit_count():
+    t = make(parties=[], zones={"RINCON_A": "Kitchen"})
+    await t.sup.reconcile()
+    await settle()
+    for i in range(8):
+        if i == 3:
+            t.clock.now += airplay.FAST_EXIT
+        t.spawner.live("Sonora: Kitchen").crash()
+        await settle()
+    assert not t.sup.receivers[("zone", "RINCON_A")].failed
+    await t.sup.close()
+
+
+async def test_an_error_while_reading_goes_through_the_restart_path():
+    t = make(parties=[], zones={"RINCON_A": "Kitchen"})
+    t.spawner.broken = 1
+    await t.sup.reconcile()
+    await settle()
+    assert t.spawner.procs[0].stopped and t.sleeper.waits == [1]
+    proc = t.spawner.live("Sonora: Kitchen")
+    proc.out.put_nowait(TONE)
+    await settle()
+    assert t.hub.sessions[0].fed == [TONE]
+    await t.sup.close()
+
+
+async def test_ports_taken_by_something_else_are_skipped():
+    t = make(parties=[], zones={"RINCON_A": "Kitchen"})
+    t.state.busy = {5100, 5101}
+    await t.sup.reconcile()
+    await settle()
+    assert t.spawner.live("Sonora: Kitchen").port() == 5102
+    await t.sup.close()
+
+
+async def test_a_receiver_whose_port_is_taken_moves_on_restart():
+    t = make(parties=[], zones={"RINCON_A": "Kitchen", "RINCON_B": "Den"})
+    await t.sup.reconcile()
+    await settle()
+    first = t.spawner.live("Sonora: Kitchen")
+    assert (first.port(), t.spawner.live("Sonora: Den").port()) == (5101, 5100)
+    t.state.busy = {5101}                         # something grabbed it meanwhile
+    first.crash()
+    await settle()
+    assert t.spawner.live("Sonora: Kitchen").port() == 5102
+    assert t.sup.receivers[("zone", "RINCON_A")].port == 5102
+    await t.sup.close()
+
+
+async def test_close_stops_the_receivers_together():
+    t = make(parties=[], zones={"RINCON_A": "Kitchen", "RINCON_B": "Den"})
+    await t.sup.reconcile()
+    await settle()
+    t.spawner.gate = gate = asyncio.Event()
+    for p in t.spawner.procs:
+        p.gate = gate
+    closing = asyncio.create_task(t.sup.close())
+    await settle()
+    assert all(p.entered.is_set() for p in t.spawner.procs)   # both stopping at once
+    gate.set()
+    await closing
+    assert not t.sup.receivers
 
 
 async def test_a_crash_while_sending_ends_the_session():
@@ -398,6 +520,25 @@ async def test_a_refused_start_waits_before_trying_again():
     await t.sup.close()
 
 
+async def test_a_room_taken_into_a_party_loses_its_receiver_without_a_resume():
+    t = make(parties=[])
+    await t.sup.reconcile()
+    await settle()
+    t.spawner.live("Sonora: Den").out.put_nowait(TONE)
+    await settle()
+    den = t.hub.sessions[0]
+    t.state.parties = [{"id": "p1", "name": "Garden Party", "speakers": ["RINCON_B"]}]
+    await t.sup.reconcile()
+    await settle()
+    assert den.reason == "shutdown"               # the hub does not seek the room's queue
+    assert sorted(r["name"] for r in t.sup.list()) == ["Sonora: Garden Party", "Sonora: Kitchen"]
+    t.state.parties = []                          # the party ends: the room is back
+    await t.sup.reconcile()
+    await settle()
+    assert sorted(r["name"] for r in t.sup.list()) == ["Sonora: Den", "Sonora: Kitchen"]
+    await t.sup.close()
+
+
 async def test_removing_a_receiver_ends_its_session_and_close_ends_the_rest():
     t = make()
     await t.sup.reconcile()
@@ -418,11 +559,63 @@ async def test_removing_a_receiver_ends_its_session_and_close_ends_the_rest():
 # -- wiring -------------------------------------------------------------------------------
 
 
-async def test_off_without_shairport_sync(caplog):
+async def _yes():
+    return True
+
+
+async def _no():
+    return False
+
+
+async def test_off_without_shairport_sync(caplog, monkeypatch):
+    monkeypatch.delenv("SONORA_AIRPLAY", raising=False)
     caplog.set_level(logging.INFO, logger="backend.home.airplay")
-    assert await airplay.start_supervisor(which=lambda _name: None) is None
+    assert await airplay.start_supervisor(which=lambda _name: None, probe=_yes) is None
     assert "shairport-sync is not installed" in caplog.text
     assert airplay.current() is None
+
+
+@pytest.mark.parametrize("value", ["0", "false", "off", "No"])
+async def test_off_switch(caplog, monkeypatch, value):
+    monkeypatch.setenv("SONORA_AIRPLAY", value)
+    caplog.set_level(logging.INFO, logger="backend.home.airplay")
+    spawner = Spawner()
+    assert await airplay.start_supervisor(which=lambda _n: "/usr/bin/shairport-sync",
+                                          spawn=spawner, probe=_yes) is None
+    assert "AirPlay off (SONORA_AIRPLAY=" in caplog.text
+    assert airplay.current() is None and spawner.procs == []
+
+
+async def test_off_without_avahi(caplog, monkeypatch):
+    monkeypatch.delenv("SONORA_AIRPLAY", raising=False)
+    caplog.set_level(logging.INFO, logger="backend.home.airplay")
+    spawner = Spawner()
+    assert await airplay.start_supervisor(which=lambda _n: "/usr/bin/shairport-sync",
+                                          spawn=spawner, probe=_no) is None
+    assert caplog.text.count("AirPlay off: no mDNS (avahi) available") == 1
+    assert airplay.current() is None and spawner.procs == []
+
+
+async def test_avahi_probe_needs_a_system_bus(monkeypatch, tmp_path):
+    monkeypatch.delenv("DBUS_SYSTEM_BUS_ADDRESS", raising=False)
+    monkeypatch.setattr(airplay, "BUS_SOCKETS", (tmp_path / "missing",))
+    assert await airplay.avahi_available() is False
+    bus = tmp_path / "system_bus_socket"
+    bus.touch()
+    monkeypatch.setattr(airplay, "BUS_SOCKETS", (bus,))
+    monkeypatch.setattr(airplay.shutil, "which", lambda _n: None)
+    assert await airplay.avahi_available() is True
+
+
+async def test_avahi_probe_asks_avahi_over_the_bus(monkeypatch, tmp_path):
+    monkeypatch.setenv("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/x")
+    answer = tmp_path / "dbus-send"
+    answer.write_text("#!/bin/sh\nexit 1\n")
+    answer.chmod(0o755)
+    monkeypatch.setattr(airplay.shutil, "which", lambda _n: str(answer))
+    assert await airplay.avahi_available(tries=2, pause=0) is False
+    answer.write_text("#!/bin/sh\nexit 0\n")
+    assert await airplay.avahi_available(tries=1) is True
 
 
 async def test_start_and_stop_supervisor(monkeypatch, tmp_path):
@@ -430,8 +623,9 @@ async def test_start_and_stop_supervisor(monkeypatch, tmp_path):
     monkeypatch.setattr(airplay, "_parties", lambda: [])
     monkeypatch.setattr(airplay, "_zones", lambda: {"RINCON_A": "Kitchen"})
     spawner = Spawner()
+    monkeypatch.delenv("SONORA_AIRPLAY", raising=False)
     sup = await airplay.start_supervisor(which=lambda _n: "/usr/bin/shairport-sync",
-                                         spawn=spawner)
+                                         spawn=spawner, probe=_yes)
     try:
         await settle()
         assert airplay.current() is sup

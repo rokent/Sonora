@@ -8,3 +8,9 @@ configuration:
     name: Speaker callback port
     description: >-
       Where the speakers report changes back to Sonora. Any free port will do.
+  airplay:
+    name: AirPlay receivers
+    description: >-
+      Show each running party and each room as an AirPlay speaker, so phones
+      and computers can send their sound to it. Uses ports 5100-5199 and
+      mDNS.
