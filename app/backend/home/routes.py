@@ -333,36 +333,51 @@ async def _start(who: Principal, *, name: str | None, speakers: list[str] | None
 _tv_tasks: set[asyncio.Task] = set()
 
 
+def queue_tv_show(tv_id: str, mode: str | None, party_id: str) -> str:
+    """Start showing ``party_id`` on a TV in the background and return the
+    mode it will show. The instant refusals (an unknown TV, a bad mode) are
+    raised as ``tvs.TvError``; the outcome of the show itself (wake, pair,
+    launch: up to ~20 s) is broadcast as ``{"type": "tv_result"}``."""
+    from . import tvs  # lazy: keeps the TV code out of this module's import
+
+    _, mode = tvs.prepare(tv_id, mode)
+    task = asyncio.create_task(_show_in_background(tv_id, mode, party_id))
+    _tv_tasks.add(task)
+    task.add_done_callback(_tv_tasks.discard)
+    return mode
+
+
 def _show_on_tv(tv: dict, party_id: str) -> dict:
     """Show a just-started preset party on the preset's TV without making the
     start wait: an unknown TV or a bad mode is answered at once as
     ``tv_error``; otherwise the show runs in the background (``tv:
-    "pending"``) and its outcome is broadcast as ``{"type": "tv_result"}``."""
-    from . import tvs  # lazy: keeps the TV code out of this module's import
+    "pending"``) and its outcome is broadcast as ``{"type": "tv_result"}``.
+    Never raises: the party has started whatever the TV does."""
+    from . import tvs
 
     try:
-        tvs.prepare(tv["tv_id"], tv.get("show"))
+        queue_tv_show(tv["tv_id"], tv.get("show"), party_id)
     except tvs.TvError as exc:
         return {"tv_error": exc.error}
-    task = asyncio.create_task(_show_in_background(tv, party_id))
-    _tv_tasks.add(task)
-    task.add_done_callback(_tv_tasks.discard)
+    except Exception:                                  # noqa: BLE001 - the party is already running
+        log.exception("tvs: preparing to show party %s on %s failed", party_id, tv.get("tv_id"))
+        return {"tv_error": "tv_failed"}
     return {"tv": "pending"}
 
 
-async def _show_in_background(tv: dict, party_id: str) -> None:
+async def _show_in_background(tv_id: str, mode: str, party_id: str) -> None:
     from . import tvs
 
     error = None
     try:
-        await tvs.show(tv["tv_id"], party_id, tv.get("show"))
+        await tvs.show(tv_id, party_id, mode)
     except tvs.TvError as exc:
         error = exc.error
     except Exception:                                  # noqa: BLE001 - reported, never raised
-        log.exception("tvs: showing party %s on %s failed", party_id, tv.get("tv_id"))
+        log.exception("tvs: showing party %s on %s failed", party_id, tv_id)
         error = "tv_failed"
     try:
-        await _main()._fan_out({"type": "tv_result", "party": party_id, "tv_id": tv["tv_id"],
+        await _main()._fan_out({"type": "tv_result", "party": party_id, "tv_id": tv_id,
                                 "ok": error is None, "error": error})
     except Exception:                                  # noqa: BLE001
         log.exception("tvs: broadcasting the result for party %s failed", party_id)
