@@ -7,12 +7,17 @@ and fans the bytes out to every speaker fetching
 ``x-rincon-mp3radio://<ip>:<port>/api/home/live/<key>.mp3``, the scheme
 Sonos uses for internet radio.
 
-Starting live sound remembers the queue's track and position. When the
-sender goes quiet for 8 s (no data, or digital silence) or disconnects, the
-session ends and the queue resumes there. A newer session on the same target
-replaces the older one and inherits the remembered point, so only one resume
-happens, after the last one ends. A party that ends while live gets no
-resume: its speakers are being released.
+Starting live sound remembers the queue's track and position (or the
+station, line-in or TV input playing). When the sender goes quiet for 8 s (no
+data, or silence: ``is_quiet``) or disconnects, the session ends and the
+queue resumes there (a station comes back only if it was playing). There is
+one live session per set of speakers: a newer session on the same target, or
+on a target with the same coordinator, replaces the older one and inherits
+the remembered point, so only one resume happens, after the last one ends;
+live sound for a room in a running party plays on the party. A party that
+ends while live, or a room taken into a party while live, gets no resume.
+Continuous sources (AirPlay, Scream) do not take a target back after being
+replaced until their sender has been quiet for ``HOLD_SECONDS``.
 
 Party sessions also feed Phase 3's analyzer (``analysis.register_source``)
 with a second, tiny ffmpeg converting to s16le mono 22050 Hz, when that
@@ -25,6 +30,7 @@ import asyncio
 import logging
 import secrets
 import shutil
+import sys
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -33,7 +39,8 @@ from typing import Any, Protocol
 log = logging.getLogger(__name__)
 
 __all__ = ["LiveHub", "LiveSession", "NoTarget", "Target", "InputFormat",
-           "DEFAULT_INPUT", "IDLE_SECONDS", "live_didl", "spawn_ffmpeg"]
+           "DEFAULT_INPUT", "IDLE_SECONDS", "HOLD_SECONDS", "HOLD_REASONS",
+           "MAX_LISTENERS", "is_quiet", "live_didl", "spawn_ffmpeg"]
 
 #: ``("party", party_id)`` or ``("zone", zone_uuid)``.
 Target = tuple[str, str]
@@ -46,6 +53,11 @@ IDLE_SECONDS = 8.0
 BACKLOG = 64 * 1024
 #: The most analysis PCM held when the analyzer is not reading (~1.5 s).
 _ANALYSIS_BACKLOG = 64 * 1024
+#: Non-queue sources put back after live sound: stations (radio schemes and
+#: plain streams), a line-in, a TV input.
+_RESTORABLE = ("x-rincon-mp3radio:", "x-sonosapi-stream:", "x-sonosapi-radio:",
+               "x-sonosapi-hls:", "x-sonosapi-hls-static:", "aac:", "hls-radio:",
+               "x-rincon-stream:", "x-sonos-htastream:", "http:", "https:")
 _READ = 16 * 1024
 #: How long an encoder gets to exit on its own before it is killed, and how
 #: long ``end`` waits for any pipe at all, so a replacement under the hub's
@@ -55,8 +67,24 @@ _CLOSE_TIMEOUT = 1.0
 #: How fresh a just-finished resume must be to be reused as the next
 #: session's resume point (the transport model lags the speaker's events).
 _JUST_RESUMED = 5.0
-#: End reasons after which the queue is not resumed.
-_NO_RESUME = frozenset({"replaced", "party_ended", "shutdown"})
+#: End reasons after which the queue is not resumed. ``joined_party``: the
+#: room of a zone session was taken into a party while live.
+_NO_RESUME = frozenset({"replaced", "party_ended", "shutdown", "joined_party"})
+#: End reasons after which a continuous source (AirPlay, Scream) must not
+#: take the speakers back on its next packet: a newer sender wins. Such a
+#: source holds until its own sender has been quiet for ``HOLD_SECONDS``.
+HOLD_REASONS = frozenset({"replaced", "joined_party"})
+HOLD_SECONDS = 2.0
+#: The most speakers fetching one live session at once (a party has a lead
+#: and its members join it, so a handful is normal).
+MAX_LISTENERS = 16
+#: Peak sample value at or below which s16 PCM counts as silence (a few LSB
+#: of dither or noise from a "silent" sender); scaled for wider samples.
+QUIET_PEAK = 16
+_WIDTH = {"s16le": 2, "s24le": 3, "s32le": 4}
+_CAST = {2: "h", 4: "i"}
+#: About this many frames are looked at per chunk (a stride through it).
+_QUIET_FRAMES = 256
 
 try:  # Phase 3's analyzer; absent in builds without it
     from . import analysis as _analysis_module
@@ -143,6 +171,36 @@ def encoder_args(fmt: InputFormat) -> list[str]:
 
 def analysis_args(fmt: InputFormat) -> list[str]:
     return [*_input_args(fmt), "-f", "s16le", "-ar", "22050", "-ac", "1", "pipe:1"]
+
+
+def is_quiet(pcm: bytes, fmt: InputFormat = DEFAULT_INPUT) -> bool:
+    """Whether ``pcm`` (in ``fmt``) is silence or near-silence: no sample in
+    a stride of frames through it is louder than ``QUIET_PEAK`` (for s16;
+    scaled up for s24 and s32). An unknown sample format counts only exact
+    zeros as quiet."""
+    sample, _rate, channels = fmt
+    width = _WIDTH.get(str(sample))
+    if width is None:
+        return not any(pcm)
+    channels = max(1, int(channels))
+    frame = width * channels
+    usable = len(pcm) - len(pcm) % frame
+    if usable <= 0:
+        return True
+    step = max(1, (usable // frame) // _QUIET_FRAMES)
+    peak = QUIET_PEAK << (8 * (width - 2))
+    view = memoryview(pcm)[:usable]
+    code = _CAST.get(width)
+    if code is not None and sys.byteorder == "little":
+        samples = view.cast(code)
+        for channel in range(channels):
+            picked = samples[channel::step * channels]
+            if max(picked) > peak or min(picked) < -peak:
+                return False
+        return True
+    return not any(abs(int.from_bytes(view[i:i + width], "little", signed=True)) > peak
+                   for start in range(0, usable, frame * step)
+                   for i in range(start, start + frame, width))
 
 
 def _x(text: str) -> str:
@@ -321,7 +379,7 @@ class LiveSession:
         """Hand PCM in the session's input format to the encoder."""
         if self.ended or not pcm:
             return
-        if pcm.strip(b"\x00"):
+        if not is_quiet(pcm, self.input_format):
             self._last_sound = self._hub._clock()
         async with self._write_lock:
             if self.ended:
@@ -334,6 +392,10 @@ class LiveSession:
             except Exception:
                 log.exception("live: writing to the encoder failed")
                 self._end_soon("encoder_failed")
+
+    def has_room(self) -> bool:
+        """Whether another speaker may listen (at most ``MAX_LISTENERS``)."""
+        return len(self._listeners) < MAX_LISTENERS
 
     def listen(self) -> AsyncIterator[bytes]:
         """The encoded stream from now on (with up to ``BACKLOG`` of what
@@ -399,14 +461,18 @@ class LiveHub:
                  base_url: Callable[[str], str], spawn: Spawn = spawn_ffmpeg,
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
-                 analysis: Callable[[str, AsyncIterator[bytes]], Callable[[], None]] | None | str = "auto") -> None:
+                 analysis: Callable[[str, AsyncIterator[bytes]], Callable[[], None]] | None | str = "auto",
+                 party_of: Callable[[str], str | None] | None = None) -> None:
         """``resolve`` maps a target to the zone whose coordinator plays it
         (a party's lead), or None when the party is not running / the room is
         unknown. ``base_url`` gives ``http://<ip>:<port>`` as the speaker at
-        a host reaches this server."""
+        a host reaches this server. ``party_of`` gives the running party a
+        room is in (None when it is in none): live sound for such a room
+        plays on the party."""
         self._controller = controller
         self._commands = commands
         self._resolve = resolve
+        self._party_of = party_of
         self._base_url = base_url
         self._spawn = spawn
         self._clock = clock
@@ -429,6 +495,8 @@ class LiveHub:
         self._lock_owner: asyncio.Task | None = None
         #: Resume tasks whose party ended before they ran: they do nothing.
         self._skip: set[asyncio.Task] = set()
+        #: Ends started from ``rooms_changed``, kept referenced.
+        self._ending: set[asyncio.Task] = set()
 
     # -- reading ---------------------------------------------------------------
 
@@ -444,20 +512,28 @@ class LiveHub:
 
     # -- starting and ending --------------------------------------------------
 
+    def _coordinator(self, zone: str) -> str:
+        try:
+            return str(self._controller.coordinator_of(zone).uuid)
+        except (KeyError, AttributeError):
+            return zone
+
     def _resume_point(self, zone: str) -> dict | None:
-        """The queue position the coordinator of ``zone`` is at, or None when
-        it is not playing from its queue."""
+        """Where the coordinator of ``zone`` is: its queue position, or the
+        station / line-in / TV it plays (``uri`` + ``metadata``, kept only
+        while it plays). None when there is nothing to come back to."""
         try:
             coord = self._controller.coordinator_of(zone)
         except KeyError:
             return None
         tr = coord.transport
-        if not str(getattr(tr, "media_uri", "")).startswith("x-rincon-queue:"):
-            return None
+        playing = getattr(tr, "state", "") in ("PLAYING", "TRANSITIONING")
+        uri = str(getattr(tr, "media_uri", "") or "")
+        if not uri.startswith("x-rincon-queue:"):
+            return self._source_point(coord, tr, uri, playing)
         track = int(getattr(tr, "track_number", 0) or 0)
         if track <= 0:
             return None
-        playing = getattr(tr, "state", "") in ("PLAYING", "TRANSITIONING")
         position = _seconds(getattr(tr, "rel_time", "0:00:00"))
         read_at = float(getattr(tr, "position_read_at", 0.0) or 0.0)
         if playing and read_at > 0:
@@ -465,12 +541,34 @@ class LiveHub:
         return {"zone": coord.uuid, "track_no": track, "position": _hms(position),
                 "playing": playing}
 
+    @staticmethod
+    def _source_point(coord, tr, uri: str, playing: bool) -> dict | None:
+        """A playing station, line-in or TV input to put back after live
+        sound (not a group member, a cloud session or live sound itself)."""
+        if not playing:
+            return None
+        track_uri = str(getattr(tr, "track_uri", "") or "")
+        if track_uri.startswith("x-sonos-htastream:") and not uri:
+            uri = track_uri
+        if (not uri or uri.startswith("x-rincon:") or uri.endswith("#vli")
+                or "/api/home/live/" in uri or getattr(tr, "is_external_session", False)):
+            return None
+        if not uri.startswith(_RESTORABLE):
+            return None
+        return {"zone": coord.uuid, "uri": uri,
+                "metadata": str(getattr(coord, "media_metadata", "") or ""),
+                "playing": True}
+
     async def start(self, *, target: Target, source_name: str, by: str,
                     input_format: InputFormat = DEFAULT_INPUT) -> LiveSession:
         """Play live sound on ``target``, ending any session already there."""
         target = (str(target[0]), str(target[1]))
         if target[0] not in ("party", "zone"):
             raise NoTarget(target)
+        party = self._party_holding(target[1]) if target[0] == "zone" else None
+        if party is not None:
+            # The room is in a running party: one session per set of speakers.
+            target = ("party", party)
         # A resume on this target finishes before anything is read for the
         # new session (it also needs the lock; waiting outside it avoids
         # depending on who reached the lock first).
@@ -487,6 +585,16 @@ class LiveHub:
             finally:
                 self._lock_owner = None
 
+    def _party_holding(self, zone: str) -> str | None:
+        if self._party_of is None:
+            return None
+        try:
+            found = self._party_of(zone)
+        except Exception:                                  # noqa: BLE001
+            log.exception("live: reading the party of %s failed", zone)
+            return None
+        return str(found) if found else None
+
     def _fresh_point(self, target: Target, zone: str) -> dict | None:
         just = self._just_resumed.pop(target, None)
         if just is not None:
@@ -494,7 +602,7 @@ class LiveHub:
             age = self._clock() - at
             if 0 <= age < _JUST_RESUMED:
                 point = dict(point)
-                if point["playing"]:
+                if point["playing"] and "position" in point:
                     point["position"] = _hms(_seconds(point["position"]) + age)
                 return point
         return self._resume_point(zone)
@@ -505,10 +613,34 @@ class LiveHub:
         if zone is None:
             raise NoTarget(target)
         old = self._current.get(target)
+        # Other sessions playing on the same coordinator (a room grouped with
+        # this one, say): one live session per set of speakers. Their resume
+        # point comes along.
+        coordinator = self._coordinator(zone)
+        others = []
+        for t, s in list(self._current.items()):
+            if t == target:
+                continue
+            other_zone = self._resolve(t)
+            if other_zone is not None and self._coordinator(other_zone) == coordinator:
+                others.append(s)
+        handed = None
+        for other in others:
+            point = self._resume.pop(other.target, None)
+            if handed is None:
+                handed = point
+            await other.end("replaced")
         if old is not None:
             # The queue position stays the one from before the first
             # session: the coordinator now plays the old live stream.
+            if handed is not None:
+                self._resume.setdefault(target, handed)
             await old.end("replaced")
+        elif others:
+            if handed is not None:
+                self._resume[target] = handed
+            else:
+                self._resume.pop(target, None)
         else:
             point = self._fresh_point(target, zone)
             if point is not None:
@@ -522,7 +654,7 @@ class LiveHub:
         except Exception:
             await session.end("failed")
             point = self._resume.pop(target, None)
-            if old is not None and point is not None:
+            if (old is not None or others) and point is not None:
                 # The old session is gone and nothing replaces it: the
                 # queue it interrupted comes back (after this start).
                 self._schedule_resume(target, point)
@@ -590,13 +722,24 @@ class LiveHub:
             zone = self._resolve(target)
             if zone is None:
                 return      # the party is gone
+            coordinator = self._coordinator(zone)
+            for other in list(self._current):
+                other_zone = self._resolve(other)
+                if other_zone is not None and self._coordinator(other_zone) == coordinator:
+                    # A newer session on another target streams to the same
+                    # speakers: seeking now would cut it. It owns the way back.
+                    self._resume.setdefault(other, point)
+                    return
             try:
                 zone = self._controller.coordinator_of(zone).uuid
             except KeyError:
                 zone = point["zone"]
             try:
-                await self._commands.seek_track(zone, point["track_no"])
-                await self._commands.seek_time(zone, point["position"])
+                if "uri" in point:
+                    await self._commands.set_source(zone, point["uri"], point["metadata"])
+                else:
+                    await self._commands.seek_track(zone, point["track_no"])
+                    await self._commands.seek_time(zone, point["position"])
                 if point["playing"]:
                     await self._commands.play(zone)
             except Exception:
@@ -617,6 +760,22 @@ class LiveHub:
         session = self._current.get(target)
         if session is not None:
             await session.end("party_ended")
+
+    def rooms_changed(self) -> None:
+        """The parties changed (not awaited): a room session whose room is
+        now in a running party ends without a resume (the party has the
+        room's speakers now)."""
+        for target, pending in list(self._resuming.items()):
+            if target[0] == "zone" and self._party_holding(target[1]) is not None:
+                self._skip.add(pending)     # the party has the room's speakers now
+        for target, session in list(self._current.items()):
+            if target[0] != "zone" or self._party_holding(target[1]) is None:
+                continue
+            self._resume.pop(target, None)
+            self._just_resumed.pop(target, None)
+            task = asyncio.ensure_future(session.end("joined_party"))
+            self._ending.add(task)
+            task.add_done_callback(self._ending.discard)
 
     async def close(self) -> None:
         """End every session (shutdown); nothing is resumed."""

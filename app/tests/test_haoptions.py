@@ -38,6 +38,18 @@ def test_the_options_set_both_ports(ha, tmp_path):
     assert os.environ["SONORA_EVENT_PORT"] == "51006"
 
 
+def test_the_scream_option_turns_the_receiver_off(ha, tmp_path):
+    import os
+    ha.delenv("SONORA_SCREAM_PORT", raising=False)
+    options = tmp_path / "options.json"
+    options.write_text(json.dumps({"scream": True}))
+    haoptions.apply(options)
+    assert "SONORA_SCREAM_PORT" not in os.environ
+    options.write_text(json.dumps({"scream": False}))
+    haoptions.apply(options)
+    assert os.environ["SONORA_SCREAM_PORT"] == "0"
+
+
 def test_a_bad_value_leaves_the_default(ha, tmp_path):
     options = tmp_path / "options.json"
     options.write_text(json.dumps({"web_port": 70000, "event_port": "x"}))

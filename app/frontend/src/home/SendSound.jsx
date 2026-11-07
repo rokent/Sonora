@@ -24,6 +24,7 @@ const CLOSE_KEYS = {
   4409: 'home.send.error.replaced',
   4410: 'home.send.error.partyEnded',
   4413: 'home.send.error.stopped',
+  4429: 'home.send.error.tooMany',
   4500: 'home.send.error.stopped',
   4503: 'home.send.error.unavailable',
 }

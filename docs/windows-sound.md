@@ -45,7 +45,17 @@ PUT /api/scream/sources/<ip>
 
 The mapping is kept in `scream.json` in Sonora's data folder. After mapping,
 the next sound Windows plays starts on that target; when Windows is silent for
-about 8 seconds the stream ends and the speaker goes back to its queue.
+about 8 seconds the stream ends and the speaker goes back to its queue (or
+the station, line-in or TV it was playing).
+
+A party's source mapping is removed when that party ends (logged once); map
+the PC again for the next party. When someone else starts sending to the same
+target (a phone over AirPlay, a browser tab), the newest sender wins: this PC
+stays off the speakers while Windows keeps playing, and gets them back once
+Windows has been quiet for 2 seconds. A change of sample rate or format on the
+PC (a new default format in Windows) switches over without the queue cutting
+in. Up to 64 sources are listed; when the list is full, unmapped sources not
+heard for 10 minutes make room, and a mapped PC is always let in.
 
 ## 5. Firewall
 
@@ -57,8 +67,10 @@ sudo ufw allow 4010/udp
 
 If Sonora runs in a container, publish the port (`-p 4010:4010/udp`); multicast
 reaches a container reliably only with host networking. Set
-`SONORA_SCREAM_PORT` to use another port, or `0` to turn the receiver off. If
-the port cannot be bound, Sonora logs a line and runs without it.
+`SONORA_SCREAM_PORT` to use another port, or `0` to turn the receiver off (the
+Unraid template's "Windows sound port" setting; in the Home Assistant app, turn
+**Windows sound receiver** off on the Configuration tab). If the port cannot
+be bound, Sonora logs a line and runs without it.
 
 ## Delay
 

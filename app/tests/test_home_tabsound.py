@@ -199,13 +199,13 @@ async def test_guest_whose_party_ends_before_sound_is_refused(env):
 
 async def test_decoder_args_and_feeding(env):
     sock = await opened("target=party:p1")
+    assert env.spawner.pipes == []              # no decoder before the first chunk
+    await sock.send_bytes(SOUND)
     (pipe,) = env.spawner.pipes
     assert pipe.args[pipe.args.index("-f") + 1] == "webm"
     assert pipe.args[pipe.args.index("-i") + 1] == "pipe:0"
     assert pipe.args[-7:] == ["-f", "s16le", "-ar", "44100", "-ac", "2", "pipe:1"]
     assert "-nostdin" in pipe.args
-    assert sock.states() == ["waiting"]
-    await sock.send_bytes(SOUND)
     await sock.send_bytes(SOUND + b"\x03")
     (session,) = env.hub.sessions
     assert session.fed == [SOUND, SOUND + b"\x03"]
@@ -241,6 +241,7 @@ async def test_after_an_idle_end_the_next_sound_starts_again(env):
 
 
 @pytest.mark.parametrize("reason,closed", [("replaced", (4409, "replaced")),
+                                           ("joined_party", (4409, "replaced")),
                                            ("party_ended", (4410, "party_ended")),
                                            ("shutdown", (4503, "shutdown"))])
 async def test_final_ends_close_the_socket(env, reason, closed):
@@ -311,7 +312,45 @@ async def test_not_ready_and_no_decoder(env):
 
     env.monkeypatch.setattr(tabsound, "spawn", missing)
     sock = await opened("target=party:p1")
+    assert sock.closed() is None
+    await sock.send_bytes(SOUND)
     assert sock.closed() == (4503, "no_decoder")
+    await asyncio.wait_for(sock.task, 2)
+    assert tabsound._running == {}
+
+
+async def test_decoder_caps_per_principal_and_in_all(env):
+    env.monkeypatch.setattr(tabsound, "_running", {})
+    a1, a2, a3 = [await opened("target=party:p1") for _ in range(3)]
+    await a1.send_bytes(SOUND)
+    await a2.send_bytes(SOUND)
+    assert a3.closed() is None                  # connecting alone costs nothing
+    await a3.send_bytes(SOUND)
+    assert a3.closed() == (4429, "too_many")
+    await asyncio.wait_for(a3.task, 2)
+    assert len(env.spawner.pipes) == 2
+    others = [await opened("target=party:p1", Principal("user", f"sub-{i + 10}", "U"))
+              for i in range(6)]
+    for sock in others:
+        await sock.send_bytes(SOUND)
+    assert [s.closed() for s in others] == [None] * 6
+    late = await opened("target=party:p1", Principal("user", "sub-99", "V"))
+    await late.send_bytes(SOUND)
+    assert late.closed() == (4429, "too_many")
+    await a1.hang_up()                          # a slot comes free
+    again = await opened("target=party:p1", Principal("user", "sub-99", "V"))
+    await again.send_bytes(SOUND)
+    assert again.closed() is None
+    for sock in (a2, *others, again):
+        await sock.hang_up()
+    assert tabsound._running == {}
+
+
+async def test_near_silence_does_not_start_a_session(env):
+    sock = await opened("target=party:p1")
+    await sock.send_bytes(b"\x02\x00\xfe\xff" * 64)       # +-2 LSB
+    assert env.hub.sessions == [] and sock.states() == ["waiting"]
+    await sock.hang_up()
 
 
 async def test_with_the_real_hub_a_newer_tab_replaces_the_older(env):

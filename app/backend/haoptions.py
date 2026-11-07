@@ -51,6 +51,10 @@ def apply(path: Path = OPTIONS) -> dict:
         value = options.get(option)
         if isinstance(value, int) and not isinstance(value, bool) and 0 < value < 65536:
             os.environ[variable] = str(value)
+    if options.get("scream") is False:
+        # The Windows sound (Scream) receiver off, as SONORA_SCREAM_PORT=0
+        # does elsewhere (backend/home/scream.py).
+        os.environ["SONORA_SCREAM_PORT"] = "0"
     return options
 
 

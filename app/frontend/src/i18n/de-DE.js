@@ -1609,6 +1609,7 @@ export default {
   'home.send.error.unavailable': 'Sending sound is not available right now.',
   'home.send.error.noAudio': 'The shared tab has no sound. Share it again and switch on its audio.',
   'home.send.error.lost': 'The connection was lost.',
+  'home.send.error.tooMany': 'Too many tabs are sending sound right now. Stop one and try again.',
   'home.files.add': 'Add files',
   'home.files.drop': 'Drop music files here',
   'home.files.pick': 'Choose files',

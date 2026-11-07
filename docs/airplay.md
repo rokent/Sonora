@@ -67,12 +67,29 @@ the receivers. It shares the host's network with any mDNS responder already
 there (another avahi, Home Assistant's). If you mount the host's D-Bus at
 `/run/dbus`, the host's avahi is used instead.
 
+When the host runs avahi too, the two daemons see each other's announcement
+of the same host name and the container's renames itself, for example
+`apps-vm` becomes `apps-vm-2` (the log shows `Host name conflict, retrying
+with apps-vm-2`). AirPlay keeps working, since senders find the receivers by
+their service names (`Sonora: ...`), not by the host name; only the
+`.local` name the container announces changes. Mounting the host's D-Bus at
+`/run/dbus` avoids the second daemon altogether.
+
 ## Turning it off
 
 Set `SONORA_AIRPLAY=0` (Docker / docker-compose environment, or the Unraid
 template's "AirPlay receivers" setting). In the Home Assistant app, turn
 **AirPlay receivers** off on the Configuration tab. Then neither the
 receivers nor the container's dbus/avahi daemons are started.
+
+## Two senders at once
+
+The newest sender wins. When someone else starts sending to the same party
+or room (another phone, a browser tab, a Windows PC), the AirPlay sender in
+use is cut off and stays off while it keeps playing: it gets the speakers
+back only after it has been quiet (paused or stopped) for 2 seconds, or after
+its receiver restarts. A room taken into a party while it plays AirPlay sound
+stops (send to the party's name instead).
 
 ## Which rooms get a name
 

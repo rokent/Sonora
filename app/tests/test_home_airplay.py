@@ -24,7 +24,7 @@ from backend.home.live import NoTarget
 
 from home_client import Client
 
-TONE = b"\x10\x00\x20\x00" * 64          # non-silent s16le stereo
+TONE = b"\x00\x10\x00\x20" * 64          # non-silent s16le stereo
 SILENCE = b"\0" * 256
 
 
@@ -556,6 +556,87 @@ async def test_removing_a_receiver_ends_its_session_and_close_ends_the_rest():
     assert all(p.stopped for p in t.spawner.procs) and not t.sup.receivers
 
 
+async def test_a_replaced_receiver_holds_until_its_sender_is_quiet_for_2s():
+    t = make(parties=[], zones={"RINCON_A": "Kitchen"})
+    await t.sup.reconcile()
+    await settle()
+    proc = t.spawner.live("Sonora: Kitchen")
+    proc.out.put_nowait(TONE)
+    await settle()
+    first = t.hub.sessions[0]
+    await first.end("replaced")                     # a tab took the room over
+    for _ in range(10):                             # the phone keeps sending
+        t.clock.now += 0.5
+        proc.out.put_nowait(TONE)
+        await settle()
+    assert len(t.hub.sessions) == 1
+    t.clock.now += 1.0
+    proc.out.put_nowait(b"\x02\x00\xfe\xff" * 64)   # near-silence is quiet
+    await settle()
+    t.clock.now += 1.1                              # 2.1 s without sound
+    proc.out.put_nowait(TONE)
+    await settle()
+    assert len(t.hub.sessions) == 2 and t.hub.sessions[1].fed == [TONE]
+    await t.sup.close()
+
+
+async def test_a_new_process_clears_the_hold():
+    t = make(parties=[], zones={"RINCON_A": "Kitchen"})
+    await t.sup.reconcile()
+    await settle()
+    proc = t.spawner.live("Sonora: Kitchen")
+    proc.out.put_nowait(TONE)
+    await settle()
+    await t.hub.sessions[0].end("replaced")
+    proc.out.put_nowait(TONE)
+    await settle()
+    assert len(t.hub.sessions) == 1
+    proc.crash()
+    await settle()
+    t.spawner.live("Sonora: Kitchen").out.put_nowait(TONE)
+    await settle()
+    assert len(t.hub.sessions) == 2
+    await t.sup.close()
+
+
+async def test_with_the_real_hub_a_tab_keeps_the_room_from_airplay():
+    from test_home_live import make_hub
+    real = make_hub()
+    t = make(parties=[], zones={"RINCON_A": "Kitchen"})
+    t.sup._hub = lambda: real.hub
+    await t.sup.reconcile()
+    await settle()
+    proc = t.spawner.live("Sonora: Kitchen")
+    proc.out.put_nowait(TONE)
+    await settle()
+    airplay_session = real.hub.current(("zone", "RINCON_A"))
+    tab = await real.hub.start(target=("zone", "RINCON_A"), source_name="tab", by="tab")
+    assert airplay_session.ended and airplay_session.reason == "replaced"
+    for _ in range(6):
+        t.clock.now += 0.3
+        proc.out.put_nowait(TONE)
+        await settle()
+    assert real.hub.current(("zone", "RINCON_A")) is tab and not tab.ended
+    t.clock.now += 2.5
+    proc.out.put_nowait(TONE)
+    await settle()
+    assert tab.ended and tab.reason == "replaced"
+    await t.sup.close()
+
+
+async def test_close_clears_the_receivers_even_if_a_stop_fails():
+    t = make(parties=[], zones={"RINCON_A": "Kitchen", "RINCON_B": "Den"})
+    await t.sup.reconcile()
+    await settle()
+
+    async def broken_stop():
+        raise RuntimeError("cannot stop")
+
+    t.spawner.live("Sonora: Den").stop = broken_stop
+    await t.sup.close()
+    assert not t.sup.receivers
+
+
 # -- wiring -------------------------------------------------------------------------------
 
 
@@ -616,6 +697,33 @@ async def test_avahi_probe_asks_avahi_over_the_bus(monkeypatch, tmp_path):
     assert await airplay.avahi_available(tries=2, pause=0) is False
     answer.write_text("#!/bin/sh\nexit 0\n")
     assert await airplay.avahi_available(tries=1) is True
+
+
+async def test_avahi_probe_kills_a_dbus_send_that_hangs(monkeypatch):
+    monkeypatch.setenv("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/x")
+    monkeypatch.setattr(airplay.shutil, "which", lambda _n: "/usr/bin/dbus-send")
+
+    class Hung:
+        killed = reaped = False
+
+        async def wait(self):
+            if self.killed:
+                self.reaped = True
+                return -9
+            await asyncio.Event().wait()
+
+        def kill(self):
+            self.killed = True
+
+    procs = []
+
+    async def exec_(*_a, **_k):
+        procs.append(Hung())
+        return procs[-1]
+
+    monkeypatch.setattr(airplay.asyncio, "create_subprocess_exec", exec_)
+    assert await airplay.avahi_available(tries=2, pause=0, timeout=0.01) is False
+    assert [(p.killed, p.reaped) for p in procs] == [(True, True)] * 2
 
 
 async def test_start_and_stop_supervisor(monkeypatch, tmp_path):
