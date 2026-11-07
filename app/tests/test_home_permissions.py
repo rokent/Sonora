@@ -81,6 +81,7 @@ EXPECTED_GUEST_WRITES = {
     ("POST", "/auth/logout"),
     ("POST", "/api/parties/{party_id}/join"),
     ("POST", "/api/parties/{party_id}/queue"),
+    ("POST", "/api/parties/{party_id}/youtube"),
     ("DELETE", "/api/parties/{party_id}/queue/{index}"),
     ("POST", "/api/parties/{party_id}/volume"),
 }
@@ -112,6 +113,7 @@ EXPECTED_GUEST_READS = {
     ("GET", "/api/queue/{uuid}"),
     ("GET", "/api/parties"),
     ("GET", "/api/parties/{party_id}/queue"),
+    ("GET", "/api/youtube/search"),
     ("GET", "/api/themes"),
     ("GET", "/api/themes/schema"),
     ("GET", "/api/themes/reference"),
@@ -145,6 +147,9 @@ def test_guest_reads_on_the_real_app_are_pinned():
 def test_guest_allowlist():
     assert allowed(GUEST_P, "POST", "/api/parties/p1/queue")
     assert allowed(GUEST_P, "POST", "/api/parties/p1/join")
+    assert allowed(GUEST_P, "POST", "/api/parties/p1/youtube")
+    assert allowed(GUEST_P, "GET", "/api/youtube/search")
+    assert not allowed(GUEST_P, "POST", "/api/youtube/search")
     assert allowed(GUEST_P, "DELETE", "/api/parties/p1/queue/3")
     assert allowed(GUEST_P, "POST", "/api/parties/p1/volume")
     for action in ("play", "pause", "next", "previous"):

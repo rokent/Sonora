@@ -59,7 +59,10 @@ class Upstream:
         headers = {"Accept-Ranges": "bytes", "Content-Type": "audio/mp4"}
         if rng:
             start, _, end = rng.removeprefix("bytes=").partition("-")
-            start = int(start)
+            start = int(start) if start else 0
+            if start >= len(DATA):
+                return web.Response(status=416, body=b"nope",
+                                    headers={"Content-Range": f"bytes */{len(DATA)}"})
             end = int(end) if end else len(DATA) - 1
             body = DATA[start:end + 1]
             headers["Content-Range"] = f"bytes {start}-{end}/{len(DATA)}"
@@ -289,3 +292,34 @@ def test_forget_audio_drops_the_cache_entry():
     youtube.forget_audio("x")
     youtube.forget_audio("never-cached")
     assert "x" not in youtube._audio_cache
+
+
+def test_issue_rejects_a_bad_video_id():
+    for bad in ("", "short", "has space!!", "../../etc/passwd", "x" * 12):
+        with pytest.raises(ValueError):
+            media.keys().issue(bad)
+    assert media.keys().issue("dQw4w9WgXcQ")
+
+
+def test_416_drops_content_length(monkeypatch):
+    key = media.keys().issue("dQw4w9WgXcQ")
+
+    async def go(up, resolves):
+        r = await client().request("GET", f"/api/home/media/{key}.m4a",
+                                   headers={"Range": "bytes=99999-"})
+        assert r.status == 416
+        assert r.headers["content-range"] == f"bytes */{len(DATA)}"
+        assert r.headers.get("content-length") in (None, "0")   # not upstream's 4
+    run(go, monkeypatch, ["/good"])
+
+
+@pytest.mark.parametrize("bad", ["bytes=0-1,5-9", "items=0-9", "bytes=a-b", "garbage"])
+def test_odd_range_values_are_not_forwarded(monkeypatch, bad):
+    key = media.keys().issue("dQw4w9WgXcQ")
+
+    async def go(up, resolves):
+        r = await client().request("GET", f"/api/home/media/{key}.m4a",
+                                   headers={"Range": bad})
+        assert r.status == 200 and r.body == DATA
+        assert "Range" not in up.seen[0][2]
+    run(go, monkeypatch, ["/good"])

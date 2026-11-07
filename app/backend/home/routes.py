@@ -26,6 +26,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from . import media, youtube
 from .auth import Principal, request_principal
 from .parties import MixedHousehold, NoSpeakers, PartyEngine, SpeakerTaken
 from .presets import Presets
@@ -362,9 +363,75 @@ async def party_queue(request: Request, party_id: str,
         uri = item.get("uri") or ""
         adders = _adders(party, uri)
         out.append({**item, "added_by": dict(adders[nth]) if nth is not None else None,
-                    "can_remove": _may_remove(party, uri, nth, who)})
+                    "can_remove": _may_remove(party, uri, nth, who),
+                    **_youtube_fields(uri)})
     return {**page, "start": start, "returned": len(out), "items": out,
             "total": len(items), "has_more": start + len(out) < len(items), "party": party_id}
+
+
+SEARCH_MAX = 10
+SEARCH_TERM_MAX = 100
+
+
+def _youtube_fields(uri: str) -> dict:
+    """``source`` and ``video_id`` for a queue item that is one of our YouTube
+    relay URLs (the badge and the video window use them)."""
+    m = media.MEDIA_URI.fullmatch(uri)
+    video_id = media.keys().video_of(m.group(1)) if m else None
+    return {"source": "youtube", "video_id": video_id} if video_id else {}
+
+
+def _brief(video: youtube.Video) -> dict:
+    return {"id": video.id, "title": video.title, "channel": video.channel,
+            "duration": video.duration, "thumbnail": video.thumbnail}
+
+
+@router.get("/api/youtube/search")
+async def youtube_search(q: str = ""):
+    term = q.strip()
+    if not 1 <= len(term) <= SEARCH_TERM_MAX:
+        return JSONResponse({"error": "bad_query"}, status_code=400)
+    try:
+        found = await youtube.search(term, SEARCH_MAX)
+    except youtube.YouTubeError:
+        return JSONResponse({"error": "youtube_failed"}, status_code=502)
+    return {"results": [_brief(v) for v in found[:SEARCH_MAX]]}
+
+
+class YouTubeBody(BaseModel):
+    video: str = Field(min_length=1, max_length=300)
+    next: bool = False
+
+
+@router.post("/api/parties/{party_id}/youtube")
+async def add_youtube_to_party_queue(request: Request, party_id: str, body: YouTubeBody):
+    who = request_principal(request)
+    try:
+        lead = _lead(_party(party_id, who))
+    except Refused as exc:
+        return _answer(exc)
+    if body.next and who.is_guest:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    video_id = youtube.parse_video_id(body.video)
+    if video_id is None:
+        return JSONResponse({"error": "bad_link"}, status_code=400)
+    try:
+        video = await youtube.info(video_id)
+        await youtube.audio_source(video_id)      # probe: nothing is queued if it fails
+    except youtube.NoAudio:
+        return JSONResponse({"error": "no_audio"}, status_code=422)
+    except youtube.YouTubeError:
+        return JSONResponse({"error": "youtube_failed"}, status_code=502)
+    host = _main().state["controller"].coordinator_of(lead).host
+    uri = media.media_url(media.keys().issue(video_id), host)
+    metadata = media.didl_for(video, uri)
+    async with _queue_lock:
+        await _main().state["commands"].add_to_queue(lead, uri, metadata, next_=body.next)
+        # Attributed even for Play Next: every add issues a fresh media key,
+        # so the URI is unique and the last-copies matching stays right.
+        engine().record_add(party_id, uri, who)
+    await changed()
+    return {"ok": True, "item": _brief(video)}
 
 
 @router.post("/api/parties/{party_id}/queue")
