@@ -76,6 +76,7 @@ a.home-join__go { text-align: center; text-decoration: none; }
 .hp-text { margin: 0; overflow-wrap: anywhere; }
 .hp-muted { color: var(--t-fg-muted, inherit); opacity: 0.8; margin: 0; }
 .hp-small { font-size: 0.82rem; }
+.hp-copyable { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; user-select: all; -webkit-user-select: all; overflow-wrap: anywhere; }
 .hp-block { display: block; }
 .hp-grow { flex: 1 1 auto; min-width: 0; }
 .hp-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

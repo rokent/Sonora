@@ -2,9 +2,8 @@
 import React, { useEffect, useState } from 'react'
 import { useI18n } from '../i18n/index.jsx'
 import { homeApi } from './api.js'
-import { Sheet, errorText } from './partyKit.jsx'
+import { PartyLink, Sheet, errorText } from './partyKit.jsx'
 import { TV_MODES, modeKey } from './tvKit.js'
-import { PartyLink } from './partyKit.jsx'
 
 export default function ShowOnTv({ party }) {
   const { t } = useI18n()

@@ -7,6 +7,7 @@ import { withBase } from '../lib/base.js'
 import { homeApi } from './api.js'
 import { useMe } from './useMe.js'
 import { PartyLink, errorText, go, usePartyPath } from './partyKit.jsx'
+import { TV_RESULT_EVENT } from './tvKit.js'
 import PartyList from './PartyList.jsx'
 import PartyView from './PartyView.jsx'
 import StartParty from './StartParty.jsx'
@@ -38,17 +39,27 @@ function useParties() {
 
 const TV_RESULT_MS = 8000
 
-/** What became of a TV show that ran in the background, for a few seconds. */
+/** What became of a TV show, for a few seconds: one that ran in the
+ * background (the server's tv_result push), or one a preset start refused
+ * at once (its tv_error, announced on this page by tvKit.js). */
 function useTvResult(isUser) {
   const { lastTvResult } = useSystem()
   const opened = useRef(Date.now())
+  const [local, setLocal] = useState(null)
   const [shown, setShown] = useState(null)
   useEffect(() => {
-    if (!isUser || !lastTvResult || lastTvResult.at < opened.current) return undefined
-    setShown(lastTvResult)
+    const onResult = (event) => setLocal(event.detail)
+    window.addEventListener(TV_RESULT_EVENT, onResult)
+    return () => window.removeEventListener(TV_RESULT_EVENT, onResult)
+  }, [])
+  // The newer of the two.
+  const latest = !local ? lastTvResult : (!lastTvResult || local.at >= lastTvResult.at ? local : lastTvResult)
+  useEffect(() => {
+    if (!isUser || !latest || latest.at < opened.current) return undefined
+    setShown(latest)
     const timer = setTimeout(() => setShown(null), TV_RESULT_MS)
     return () => clearTimeout(timer)
-  }, [lastTvResult, isUser])
+  }, [latest, isUser])
   return shown
 }
 

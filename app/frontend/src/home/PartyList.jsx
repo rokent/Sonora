@@ -8,6 +8,7 @@ import Art from '../components/Art.jsx'
 import { homeApi } from './api.js'
 import { useMe } from './useMe.js'
 import { PartyLink, Sheet, errorText, go, partyNowPlaying, partyRooms, useMoveAsk } from './partyKit.jsx'
+import { announceTvResult } from './tvKit.js'
 
 function PartyCard({ party, me, reload }) {
   const { t } = useI18n()
@@ -68,6 +69,7 @@ function PresetSheet({ preset, onClose }) {
     try {
       const party = await runMove((extra) => homeApi.startPreset(preset.id, extra))
       if (!party) { setBusy(false); return }
+      if (party.tv_error) announceTvResult({ party: party.id, ok: false, error: party.tv_error })
       go(`/party/p/${encodeURIComponent(party.id)}`)
     } catch (exc) {
       setError(errorText(t, exc))
