@@ -49,7 +49,7 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from fastapi import APIRouter, FastAPI
 
-from .live import NoTarget, Target
+from .live import HOLD_REASONS, HOLD_SECONDS, NoTarget, Target, is_quiet
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +165,12 @@ class Receiver:
         #: Bytes read from the current process, for frame alignment.
         self.offset = 0
         self.hold_until = 0.0
+        #: Its session was taken over by a newer sender ("replaced"): sound
+        #: is dropped until this receiver's sender has been quiet for
+        #: HOLD_SECONDS (or a new process starts), so the newer one keeps
+        #: the speakers instead of the two taking turns.
+        self.held = False
+        self.last_sound = 0.0
 
     def as_dict(self) -> dict:
         return {"name": self.name, "target": {"kind": self.target[0], "id": self.target[1]},
@@ -286,6 +292,7 @@ class AirPlaySupervisor:
                 rcv.process = None
             if rcv.process is not None:
                 rcv.offset = 0
+                rcv.held = False
                 try:
                     await self._pump(rcv)
                 except Exception:                          # noqa: BLE001
@@ -332,11 +339,19 @@ class AirPlaySupervisor:
             return
         session = rcv.session
         if session is None or session.ended:
+            if session is not None and session.reason in HOLD_REASONS and not rcv.held:
+                rcv.held, rcv.last_sound = True, self._clock()
             rcv.session = session = None
             # Only real sound starts a session: a sender left paused may keep
             # sending silence, which would restart it after every idle end.
-            if not chunk.strip(b"\0") or self._clock() < rcv.hold_until:
+            if is_quiet(chunk[(-at) % FRAME:], PCM) or self._clock() < rcv.hold_until:
                 return
+            if rcv.held:
+                now, quiet_for = self._clock(), self._clock() - rcv.last_sound
+                rcv.last_sound = now
+                if quiet_for < HOLD_SECONDS:
+                    return
+                rcv.held = False
             chunk = chunk[(-at) % FRAME:]          # start on a whole frame
             try:
                 session = await self._hub().start(target=rcv.target, source_name="AirPlay",
@@ -364,7 +379,10 @@ class AirPlaySupervisor:
         rcv.stopping = True
         await self._end_session(rcv, reason)
         if rcv.process is not None:
-            await rcv.process.stop()
+            try:
+                await rcv.process.stop()
+            except Exception:                              # noqa: BLE001
+                log.exception("airplay: stopping %r failed", rcv.name)
         if rcv.task is not None and rcv.task is not asyncio.current_task():
             rcv.task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -427,7 +445,7 @@ def port_is_free(port: int) -> bool:
 BUS_SOCKETS = (Path("/run/dbus/system_bus_socket"), Path("/var/run/dbus/system_bus_socket"))
 
 
-async def avahi_available(*, tries: int = 3, pause: float = 1.0) -> bool:
+async def avahi_available(*, tries: int = 3, pause: float = 1.0, timeout: float = 5.0) -> bool:
     """Whether an avahi daemon answers on the system D-Bus. shairport-sync
     cannot announce (and exits at once) without one."""
     if not os.environ.get("DBUS_SYSTEM_BUS_ADDRESS") and not any(p.exists() for p in BUS_SOCKETS):
@@ -436,6 +454,7 @@ async def avahi_available(*, tries: int = 3, pause: float = 1.0) -> bool:
     if send is None:
         return True                    # a bus is there; nothing to ask avahi with
     for attempt in range(tries):
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 send, "--system", "--print-reply", "--reply-timeout=2000",
@@ -443,9 +462,16 @@ async def avahi_available(*, tries: int = 3, pause: float = 1.0) -> bool:
                 "org.freedesktop.Avahi.Server.GetVersionString",
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
-            if await asyncio.wait_for(proc.wait(), 5.0) == 0:
+            if await asyncio.wait_for(proc.wait(), timeout) == 0:
                 return True
-        except (OSError, TimeoutError):
+        except TimeoutError:          # before OSError: it is one
+            # A dbus-send that hangs is killed, not left behind.
+            if proc is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+        except OSError:
             pass
         if attempt + 1 < tries:
             await asyncio.sleep(pause)
