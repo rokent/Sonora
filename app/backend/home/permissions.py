@@ -48,6 +48,7 @@ PUBLIC: list[tuple[str, re.Pattern]] = [
     _rule("GET", rf"/api/stream/audio/{_SEG}"),   # fetched by speakers
     _rule("GET", r"/api/art"),                    # fetched by speakers and <img>
     _rule("GET", r"/api/home/media/.+"),          # Phase 2+ media for speakers
+    _rule("GET", r"/api/home/files/.+"),          # dropped files, for speakers
     _rule("GET", r"/api/health"),                 # backend.healthcheck
 ]
 
@@ -62,6 +63,7 @@ GUEST: list[tuple[str, re.Pattern]] = [
     _rule("POST", rf"/api/parties/{_SEG}/join"),
     _rule("POST", rf"/api/parties/{_SEG}/queue"),
     _rule("POST", rf"/api/parties/{_SEG}/youtube"),
+    _rule("POST", rf"/api/parties/{_SEG}/files"),
     _rule("GET", r"/api/youtube/search"),
     _rule("DELETE", rf"/api/parties/{_SEG}/queue/{_SEG}"),
     _rule("POST", rf"/api/parties/{_SEG}/transport/(play|pause|next|previous)"),

@@ -72,5 +72,7 @@ def install(app: FastAPI) -> None:
     app.include_router(pages)
     from . import media  # YouTube relay for speakers (Phase 2)
     app.include_router(media.router)
+    from . import files  # dropped music files for speakers (Phase 4)
+    app.include_router(files.router)
     from . import analysis  # /ws/visual: TV mode's exact visuals (Phase 3)
     app.include_router(analysis.router)
