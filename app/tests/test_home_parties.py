@@ -839,3 +839,10 @@ def test_kept_queue_is_not_put_on_a_speaker_whose_queue_could_not_be_written_dow
     assert put == [] and not any(c[0] in ("set_source", "play") for c in rig.commands.calls)
     listed = engine.get(party["id"])
     assert listed["speakers"] == ["C"] and listed["kept_queue"] == 1   # kept for later
+
+
+def test_a_song_added_during_live_sound_only_queues(rig):
+    engine, pid = _party_on_airplay(rig)
+    _plays(rig, "A", "x-rincon-mp3radio://10.0.0.5:8000/api/home/live/k1.mp3")
+    assert run(engine.play_added(pid, "x-file:9", {"FirstTrackNumberEnqueued": "3"})) is False
+    assert rig.commands.calls == []

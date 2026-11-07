@@ -688,7 +688,8 @@ class PartyEngine:
         some other source (a phone over AirPlay, a station, the TV), point
         it at the queue and play from the added track, so the guest hears
         it and Next moves through the party's queue, not the other source.
-        A lead already on its queue is left alone. Its place is
+        A lead already on its queue, or playing live sound from Sonora, is
+        left alone. Its place is
         ``position``, else the speaker's answer to the add (``result``),
         else the added URI's last copy in the queue. Says whether the lead
         was switched.
@@ -705,6 +706,10 @@ class PartyEngine:
             queue = f"x-rincon-queue:{lead}#0"
             loaded = self._media_of(lead)
             if loaded is None or loaded == queue:
+                return False
+            if _LIVE_PATH in loaded:
+                # Live sound from Sonora: the live hub puts the party's queue
+                # back on when the sender stops, so the song only waits there.
                 return False
             index = position or _first_track(result) or await self._position_of(lead, uri)
             party.own_source = None
