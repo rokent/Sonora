@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -11,6 +10,8 @@ from fastapi import FastAPI
 from backend.config import settings
 from backend.home import auth, auth_routes
 from backend.home.auth import LOCAL, GuestPass, Principal, read_session, sign_session
+
+from home_client import Client
 
 
 @pytest.fixture(autouse=True)
@@ -22,59 +23,6 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("SONORA_OIDC_CLIENT_SECRET", "s3cret")
     auth_routes._discovery_cache.clear()
     return tmp_path
-
-
-class Client:
-    """A bare ASGI client (httpx is not installed), keeping cookies."""
-
-    def __init__(self, app, scheme="http"):
-        self.app, self.scheme, self.cookies = app, scheme, {}
-
-    async def request(self, method, path, body=None, headers=None):
-        path, _, query = path.partition("?")
-        raw = json.dumps(body).encode() if body is not None else b""
-        hdrs = [(b"host", b"sonora.test"), (b"content-type", b"application/json")]
-        hdrs += [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
-        if self.cookies:
-            jar = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
-            hdrs.append((b"cookie", jar.encode()))
-        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-                 "method": method, "scheme": self.scheme, "path": path,
-                 "raw_path": path.encode(), "query_string": query.encode(),
-                 "headers": hdrs, "server": ("sonora.test", 80), "client": ("1.2.3.4", 1)}
-        sent = [{"type": "http.request", "body": raw, "more_body": False}]
-        out = {"status": 0, "headers": [], "body": b""}
-
-        async def receive():
-            return sent.pop(0) if sent else {"type": "http.disconnect"}
-
-        async def send(msg):
-            if msg["type"] == "http.response.start":
-                out["status"], out["headers"] = msg["status"], msg["headers"]
-            elif msg["type"] == "http.response.body":
-                out["body"] += msg.get("body", b"")
-
-        await self.app(scope, receive, send)
-        for k, v in out["headers"]:
-            if k == b"set-cookie":
-                name, _, rest = v.decode().partition("=")
-                value = rest.split(";", 1)[0]
-                if value in ("", '""') or "Max-Age=0" in rest:
-                    self.cookies.pop(name, None)
-                else:
-                    self.cookies[name] = value
-        return Response(out)
-
-
-class Response:
-    def __init__(self, out):
-        self.status = out["status"]
-        self.headers = {k.decode(): v.decode() for k, v in out["headers"]}
-        self.set_cookies = [v.decode() for k, v in out["headers"] if k == b"set-cookie"]
-        self.body = out["body"]
-
-    def json(self):
-        return json.loads(self.body)
 
 
 def make_app():

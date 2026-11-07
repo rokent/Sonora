@@ -44,6 +44,8 @@ from .sonos import scenes
 from .sonos import scene_alarms
 from .sonos import smb
 from . import ingress, origin
+from .home import permissions as home_permissions
+from .home.install import install as install_home
 from . import release
 from . import locale as locales
 from .errorlog import ErrorLog
@@ -150,6 +152,8 @@ app = FastAPI(title="Sonora", lifespan=lifespan)
 # That is deliberate (SECURITY.md). It does not extend to a website
 # driving it through a visitor's browser, which this refuses.
 app.middleware("http")(origin.guard)
+# Sonora Home: sign-in and per-principal permissions (backend/home/).
+install_home(app)
 
 
 #: Routes that pass on what someone else's server sent. A picture can be an
@@ -318,6 +322,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     if not origin.websocket_allowed(websocket):
         log.warning("refused a socket from origin %s",
                     websocket.headers.get("origin", "")[:60])
+        await websocket.close(code=1008)
+        return
+    if not home_permissions.ws_allowed(websocket):
         await websocket.close(code=1008)
         return
     await websocket.accept()
