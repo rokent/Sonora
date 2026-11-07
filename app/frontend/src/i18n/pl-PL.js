@@ -1422,4 +1422,10 @@ export default {
   'home.parties.title': 'Parties',
   'home.join.badName': 'Please enter a first name the host can recognise.',
   'home.join.network': 'Could not reach the speakers. Check your connection and try again.',
+  'home.visualizer.label': 'Music visualizer',
+  'home.visualizer.loading': 'Loading the visualizer',
+  'home.visualizer.unsupported': 'This screen cannot show the visualizer.',
+  'home.visualizer.useMic': 'Use microphone',
+  'home.visualizer.micDenied': 'The microphone is not available.',
+  'home.visualizer.nextPreset': 'Next preset',
 }

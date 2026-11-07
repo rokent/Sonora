@@ -1,10 +1,13 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { butterchurnPresets } from './vite.butterchurn.js'
 
 // The API and the WebSocket live on the Python backend. In development Vite
 // proxies both so the browser sees a single origin and no CORS is involved.
 export default defineConfig({
-  plugins: [react()],
+  // butterchurnPresets: the visualizer's presets compiled at build time, so
+  // the page needs no eval (see vite.butterchurn.js).
+  plugins: [react(), butterchurnPresets()],
   server: {
     port: 5173,
     // The themes live outside this directory, at the repository's own
