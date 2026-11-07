@@ -17,5 +17,27 @@ services:
       # SONORA_OIDC_GROUP: sonora-users
       # Set to 1 when Sonora sits behind a reverse proxy you trust.
       # SONORA_TRUST_PROXY: 1
+      # Optional shared browser (see docs/remote-browser.md): full control for
+      # household members, watch-only for guests.
+      # SONORA_NEKO_URL: http://sonora.local:8080/?usr=host&pwd=change-me-admin
+      # SONORA_NEKO_VIEW_URL: http://sonora.local:8080/?usr=guest&pwd=change-me-user
     volumes:
       - ./sonora-data:/data
+
+  # Optional: a shared browser the whole party can watch (and members control).
+  # neko:
+  #   image: ghcr.io/m1k1o/neko/chromium:latest
+  #   container_name: neko
+  #   restart: unless-stopped
+  #   shm_size: 2gb
+  #   cap_add: [SYS_ADMIN]
+  #   network_mode: host
+  #   environment:
+  #     NEKO_DESKTOP_SCREEN: 1920x1080@30
+  #     NEKO_MEMBER_PROVIDER: multiuser
+  #     NEKO_MEMBER_MULTIUSER_USER_PASSWORD: change-me-user
+  #     NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD: change-me-admin
+  #     NEKO_WEBRTC_EPR: 52000-52100
+  #     NEKO_WEBRTC_ICELITE: 1
+  #   volumes:
+  #     - ./neko-policies.json:/etc/chromium/policies/managed/policies.json:ro

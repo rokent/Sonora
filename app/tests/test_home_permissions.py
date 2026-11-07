@@ -100,6 +100,7 @@ EXPECTED_GUEST_READS = {
     ("GET", "/api/stream/audio/{key}"),
     ("GET", "/api/home/media/{key}.m4a"),          # public: speakers
     ("GET", "/api/state"),
+    ("GET", "/api/home/config"),
     ("GET", "/api/favorites"),
     ("GET", "/api/services"),
     ("GET", "/api/services/{sid}/browse"),
@@ -157,7 +158,7 @@ def test_guest_allowlist():
 
 
 def test_guest_reads():
-    for path in ("/api/state", "/ws", "/api/parties", "/api/parties/p1/queue",
+    for path in ("/api/state", "/api/home/config", "/ws", "/api/parties", "/api/parties/p1/queue",
                  "/api/favorites", "/api/services", "/api/services/12/browse",
                  "/api/services/12/search", "/api/services/12/letters",
                  "/api/services/12/item", "/api/browse",
