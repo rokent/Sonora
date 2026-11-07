@@ -27,6 +27,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from .live import HOLD_REASONS, HOLD_SECONDS, is_quiet
 from .store import home_dir, read_json, write_json
 
 log = logging.getLogger(__name__)
@@ -36,6 +37,10 @@ DEFAULT_PORT = 4010
 HEADER = 5
 _FORMATS = {16: "s16le", 24: "s24le", 32: "s32le"}
 _MAX_SOURCES = 64
+#: When the list is full, an unmapped source unheard for this long makes room.
+_EVICT_AFTER = 600.0
+#: The fastest sample rate taken (8 x 48 kHz); a bigger multiplier is junk.
+MAX_RATE = 384000
 _QUEUE_PACKETS = 200      # about a second of audio per source; older is dropped
 _RETRY_SECONDS = 3.0      # between tries to start a session that was refused
 _FEEDER_IDLE = 30.0       # a source's worker leaves after this long without packets
@@ -54,6 +59,8 @@ def parse(data: bytes) -> tuple[InputFormat, bytes] | None:
     if fmt is None or channels == 0 or multiplier == 0:
         return None
     rate = (44100 if code & 0x80 else 48000) * multiplier
+    if rate > MAX_RATE:
+        return None
     frame = channels * bits // 8
     pcm = data[HEADER:]
     pcm = pcm[: len(pcm) - len(pcm) % frame]
@@ -93,6 +100,10 @@ class _Source:
         self.session: Any = None
         self.session_key: tuple | None = None   # (format, target) the session was started for
         self.retry_at = 0.0
+        #: Its session was taken over by a newer sender: held until this
+        #: sender has been quiet for HOLD_SECONDS (see ``live.HOLD_REASONS``).
+        self.held = False
+        self.last_sound = 0.0
 
 
 class ScreamReceiver(asyncio.DatagramProtocol):
@@ -158,7 +169,7 @@ class ScreamReceiver(asyncio.DatagramProtocol):
         fmt, pcm = parsed
         source = self.sources.get(ip)
         if source is None:
-            if len(self.sources) >= _MAX_SOURCES:
+            if len(self.sources) >= _MAX_SOURCES and not self._make_room(ip):
                 return
             source = self.sources[ip] = _Source()
         source.last_seen, source.format = self._clock(), fmt
@@ -169,6 +180,44 @@ class ScreamReceiver(asyncio.DatagramProtocol):
         source.queue.put_nowait((fmt, pcm))
         if source.task is None or source.task.done():
             source.task = asyncio.ensure_future(self._work(ip, source))
+
+    def _make_room(self, ip: str) -> bool:
+        """Free a place for ``ip`` in a full list: unmapped sources unheard
+        for ``_EVICT_AFTER`` go; a mapped IP is always let in (the oldest
+        idle unmapped source makes way, or the list grows past the cap,
+        which is bounded by the mapping's size)."""
+        mapping = self.mapping()
+        now = self._clock()
+        idle = [i for i, src in self.sources.items()
+                if i not in mapping and (src.task is None or src.task.done())]
+        stale = [i for i in idle if now - self.sources[i].last_seen > _EVICT_AFTER]
+        for i in stale:
+            del self.sources[i]
+        if len(self.sources) < _MAX_SOURCES:
+            return True
+        if ip not in mapping:
+            return False
+        if idle := [i for i in idle if i in self.sources]:
+            del self.sources[min(idle, key=lambda i: self.sources[i].last_seen)]
+        return True
+
+    def party_ended(self, party_id: str) -> None:
+        """The party ended: sources mapped to it are unmapped (one log line),
+        so they stop trying to start on a party that is gone."""
+        mapping = self.mapping()
+        gone = [ip for ip, t in mapping.items() if t["kind"] == "party" and t["id"] == party_id]
+        if not gone:
+            return
+        mapping = {ip: t for ip, t in mapping.items() if ip not in gone}
+        try:
+            write_json(self._path_fn(), mapping)
+        except OSError:
+            log.exception("scream: saving the mapping failed")
+        self._map = mapping
+        for ip in gone:
+            if (source := self.sources.get(ip)) is not None:
+                source.session_key = None
+        log.info("scream: party %s ended; unmapped %s", party_id, ", ".join(sorted(gone)))
 
     async def _work(self, ip: str, source: _Source) -> None:
         try:
@@ -190,21 +239,39 @@ class ScreamReceiver(asyncio.DatagramProtocol):
             return
         key = (fmt, target["kind"], target["id"])
         session = source.session
-        if session is not None and (session.ended or source.session_key != key):
-            if not session.ended:
-                await session.end("source_changed")
+        handover = False
+        if session is not None and session.ended:
+            if session.reason in HOLD_REASONS and not source.held:
+                source.held, source.last_sound = True, self._mono()
             session = source.session = None
-        if session is None:
+        elif session is not None and source.session_key != key:
+            if source.session_key is not None and source.session_key[1:] == key[1:]:
+                # Same target, new format: the new session takes over (and
+                # inherits the resume point) without the queue cutting in.
+                handover = True
+            else:
+                await session.end("source_changed")
+                session = source.session = None
+        if session is None or handover:
             # A session that ended on silence is not restarted by more silence:
             # that would cut the queue back in just to stop it again.
-            if not any(pcm) or self._mono() < source.retry_at:
+            if (not handover and is_quiet(pcm, fmt)) or self._mono() < source.retry_at:
                 return
+            if source.held and not handover:
+                now, quiet_for = self._mono(), self._mono() - source.last_sound
+                source.last_sound = now
+                if quiet_for < HOLD_SECONDS:
+                    return
+                source.held = False
             try:
                 session = await self._hub().start(
                     target=(target["kind"], target["id"]),
                     source_name=f"Windows ({ip})", by="scream", input_format=fmt)
             except Exception as exc:
                 source.retry_at = self._mono() + _RETRY_SECONDS
+                if handover:
+                    await session.end("source_changed")
+                    source.session = None
                 log.info("scream: %s not played on %s %s: %s", ip, target["kind"], target["id"], exc)
                 return
             source.session, source.session_key = session, key

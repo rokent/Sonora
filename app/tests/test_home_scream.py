@@ -15,7 +15,7 @@ from backend.home.auth import Principal
 from home_client import Client
 
 
-def packet(code=0x01, bits=16, channels=2, pcm=b"\x01\x00" * 576):
+def packet(code=0x01, bits=16, channels=2, pcm=b"\x00\x10" * 576):
     return bytes([code, bits, channels, 3, 0]) + pcm
 
 
@@ -84,6 +84,12 @@ def test_header_rejects_junk_and_trims_partial_frames():
     assert len(pcm) == 8
 
 
+def test_header_rejects_rates_over_384k():
+    assert scream.parse(packet(0x08, 16, 2))[0][1] == 384000
+    assert scream.parse(packet(0x09, 16, 2)) is None
+    assert scream.parse(packet(0xFF, 16, 2)) is None
+
+
 # --- mapping --------------------------------------------------------------
 
 
@@ -104,7 +110,9 @@ async def test_mapped_source_feeds_a_session(env):
     await settle()
     first, second = env.hub.sessions
     assert first.target == ("party", "p1") and first.format == ("s16le", 48000, 2)
-    assert first.fed == [p[5:]] and first.ended and first.reason == "source_changed"
+    # Same target, new format: a plain start (the hub hands over), no end
+    # from here that would cut the queue in between.
+    assert first.fed == [p[5:]] and not first.ended
     assert second.format == ("s16le", 44100, 2) and len(second.fed) == 1
     assert first.by == "scream" and "10.0.0.5" in first.source_name
 
@@ -149,6 +157,120 @@ async def test_refused_start_backs_off(env):
     env.datagram_received(packet(), ("10.0.0.5", 1))
     await settle()
     assert len(env.hub.sessions) == 1
+
+
+async def test_a_target_change_ends_the_old_session(env):
+    env.set_target("10.0.0.5", {"kind": "party", "id": "p1"})
+    env.datagram_received(packet(), ("10.0.0.5", 1))
+    await settle()
+    env.set_target("10.0.0.5", {"kind": "zone", "id": "RINCON_1"})
+    env.datagram_received(packet(), ("10.0.0.5", 1))
+    await settle()
+    first, second = env.hub.sessions
+    assert first.ended and first.reason == "source_changed"
+    assert second.target == ("zone", "RINCON_1")
+
+
+async def test_with_the_real_hub_a_format_change_hands_over_without_a_resume():
+    from test_home_live import make_hub
+    t = make_hub()
+    rx = scream.ScreamReceiver(lambda: t.hub, path_fn=lambda: None)
+    rx._map = {"10.0.0.5": {"kind": "party", "id": "p1"}}
+    rx.datagram_received(packet(), ("10.0.0.5", 1))
+    await settle()
+    rx.datagram_received(packet(0x81), ("10.0.0.5", 1))
+    await settle()
+    first, second = rx.sources["10.0.0.5"].session, None
+    assert t.commands.resumes() == []           # no queue blip between the two
+    assert [c[0] for c in t.commands.calls] == ["play_now", "play_now"]
+    sessions = t.hub.sessions()
+    assert len(sessions) == 1 and sessions[0] is first and not first.ended
+    await first.end("disconnected")
+    assert [c[0] for c in t.commands.resumes()] == ["seek_track", "seek_time", "play"]
+
+
+# --- newer sender wins ----------------------------------------------------
+
+
+async def test_a_replaced_source_holds_until_quiet_for_2s(env):
+    env.set_target("10.0.0.5", {"kind": "party", "id": "p1"})
+    env.datagram_received(packet(), ("10.0.0.5", 1))
+    await settle()
+    first = env.hub.sessions[0]
+    first.ended, first.reason = True, "replaced"     # a tab took the party over
+    for step in range(10):                           # it keeps sending sound
+        env.now["m"] += 0.5
+        env.datagram_received(packet(), ("10.0.0.5", 1))
+        await settle()
+    assert len(env.hub.sessions) == 1
+    env.now["m"] += 1.0                              # quiet packets only: not sound
+    env.datagram_received(packet(pcm=b"\x01\x00" * 576), ("10.0.0.5", 1))
+    await settle()
+    env.now["m"] += 1.1
+    env.datagram_received(packet(), ("10.0.0.5", 1))
+    await settle()
+    assert len(env.hub.sessions) == 2 and env.hub.sessions[1].fed
+
+
+async def test_with_the_real_hub_a_tab_keeps_the_party_from_scream():
+    from test_home_live import make_hub
+    t = make_hub()
+    now = {"m": 0.0}
+    rx = scream.ScreamReceiver(lambda: t.hub, path_fn=lambda: None, mono=lambda: now["m"])
+    rx._map = {"10.0.0.5": {"kind": "party", "id": "p1"}}
+    rx.datagram_received(packet(), ("10.0.0.5", 1))
+    await settle()
+    tab = await t.hub.start(target=("party", "p1"), source_name="tab", by="tab")
+    for _ in range(6):
+        now["m"] += 0.3
+        rx.datagram_received(packet(), ("10.0.0.5", 1))
+        await settle()
+    assert t.hub.current(("party", "p1")) is tab and not tab.ended
+    now["m"] += 2.5
+    rx.datagram_received(packet(), ("10.0.0.5", 1))
+    await settle()
+    assert tab.ended and tab.reason == "replaced"
+    await rx.close()
+
+
+# --- the source list ------------------------------------------------------
+
+
+async def test_a_full_list_evicts_stale_unmapped_sources(env):
+    for i in range(scream._MAX_SOURCES):
+        env.datagram_received(packet(), (f"10.1.0.{i + 1}", 1))
+    env.now["t"] += 60
+    env.datagram_received(packet(), ("10.2.0.1", 1))
+    assert "10.2.0.1" not in env.sources          # all still fresh
+    env.now["t"] += scream._EVICT_AFTER
+    env.datagram_received(packet(), ("10.1.0.1", 1))   # one stays fresh
+    env.datagram_received(packet(), ("10.2.0.1", 1))
+    assert "10.2.0.1" in env.sources and "10.1.0.1" in env.sources
+    assert len(env.sources) == 2
+
+
+async def test_a_mapped_ip_is_always_admitted(env):
+    for i in range(scream._MAX_SOURCES):
+        env.datagram_received(packet(), (f"10.1.0.{i + 1}", 1))
+    env.set_target("10.3.0.1", {"kind": "zone", "id": "RINCON_1"})
+    env.datagram_received(packet(), ("10.3.0.1", 1))
+    await settle()
+    assert "10.3.0.1" in env.sources and len(env.sources) == scream._MAX_SOURCES
+    assert "10.1.0.1" not in env.sources       # the longest unheard made way
+    assert env.hub.sessions and env.hub.sessions[0].target == ("zone", "RINCON_1")
+    await env.close()
+
+
+async def test_party_end_unmaps_its_sources_once(env, tmp_path, caplog):
+    env.set_target("10.0.0.5", {"kind": "party", "id": "p1"})
+    env.set_target("10.0.0.6", {"kind": "zone", "id": "RINCON_1"})
+    with caplog.at_level("INFO"):
+        env.party_ended("p1")
+        env.party_ended("p1")
+    assert env.mapping() == {"10.0.0.6": {"kind": "zone", "id": "RINCON_1"}}
+    saved = json.loads((tmp_path / "home" / "scream.json").read_text())
+    assert saved == {"10.0.0.6": {"kind": "zone", "id": "RINCON_1"}}
+    assert caplog.text.count("party p1 ended") == 1
 
 
 def test_mapping_is_persisted(env, tmp_path):
